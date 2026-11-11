@@ -18,3 +18,4 @@ database/
 .jwt-secret.php
 .login-attempts.json
 release-cpanel/
+release-cpanel.zip
