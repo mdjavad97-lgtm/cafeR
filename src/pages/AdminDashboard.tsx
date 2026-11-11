@@ -34,6 +34,7 @@ export default function AdminDashboard() {
   const [isEditingBrand, setIsEditingBrand] = useState(false);
   const [brandSettings, setBrandSettings] = useState<BrandSettings>(DEFAULT_BRAND_SETTINGS);
   const [savingBrand, setSavingBrand] = useState(false);
+  const [newAdminPassword, setNewAdminPassword] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
   const [editingCategory, setEditingCategory] = useState<{id: number, name: string} | null>(null);
   const [editingProductId, setEditingProductId] = useState<number | null>(null);
@@ -107,9 +108,25 @@ export default function AdminDashboard() {
         body: JSON.stringify(brandSettings),
       });
       if (res.ok) {
+        if (newAdminPassword.trim().length > 0) {
+          if (newAdminPassword.trim().length < 6) {
+            toast.error('رمز عبور جدید باید حداقل ۶ کاراکتر باشد');
+            setSavingBrand(false);
+            return;
+          }
+          await fetch(`${import.meta.env.BASE_URL}api/auth/password`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + localStorage.getItem('admin_token'),
+            },
+            body: JSON.stringify({ newPassword: newAdminPassword.trim() }),
+          });
+          setNewAdminPassword('');
+        }
         localStorage.setItem('brand_theme', brandSettings.brand_theme);
         document.title = `${brandSettings.cafe_name} | پنل مدیریت`;
-        toast.success('تنظیمات نام، لوگو و برند کافه با موفقیت ذخیره شد');
+        toast.success('تنظیمات برند و امنیت با موفقیت ذخیره شد');
         setIsEditingBrand(false);
         window.dispatchEvent(new Event('brand-settings-updated'));
       } else {
@@ -690,6 +707,21 @@ export default function AdminDashboard() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Admin Password Update (Replaces standalone hash.php) */}
+            <div className="pt-3 border-t border-gray-100">
+              <label className="block text-xs font-semibold text-gray-700 mb-1">
+                تغییر رمز عبور پنل مدیریت (اختیاری)
+              </label>
+              <input
+                type="password"
+                dir="ltr"
+                value={newAdminPassword}
+                onChange={e => setNewAdminPassword(e.target.value)}
+                placeholder="در صورت تمایل به تغییر رمز، رمز جدید (حداقل ۶ کاراکتر) را وارد کنید"
+                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-xs text-left focus:outline-none focus:ring-2 focus:ring-primary/40"
+              />
             </div>
 
             <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">

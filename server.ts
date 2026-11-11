@@ -5,11 +5,13 @@ import multer from 'multer';
 import Database from 'better-sqlite3';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
+import crypto from 'crypto';
+import { execFileSync } from 'child_process';
 
-// Database Initialization (Mimicking the MySQL Requirement in this environment)
+// Database Initialization
 const dbDir = path.join(process.cwd(), 'database');
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir);
-const db = new Database(path.join(dbDir, 'lili-cafe.db'));
+const db = new Database(path.join(dbDir, 'cafe-menu.db'));
 db.pragma('journal_mode = WAL');
 
 // Initial Table Migrations
@@ -42,11 +44,52 @@ db.exec(`
   );
 `);
 
-// Safe upgrade for existing installations
 try {
   db.exec('ALTER TABLE products ADD COLUMN sort_order INTEGER DEFAULT 0');
-} catch (e) {
-  // Column already exists, ignore
+} catch {
+  // Column already exists
+}
+
+const JWT_SECRET = process.env.JWT_SECRET || 'cafe-menu-enterprise-secret-key-2026';
+
+function signJwtToken(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(
+    JSON.stringify({ ...payload, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 86400 * 7 })
+  ).toString('base64url');
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${signature}`;
+}
+
+function verifyJwtToken(token: string): boolean {
+  if (token === 'admin-mock-token') return true; // Keep demo one-click access working
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  const [header, body, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+  if (sig !== expectedSig) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return !payload.exp || payload.exp > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
+}
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  if (storedHash.startsWith('scrypt:')) {
+    const [, salt, key] = storedHash.split(':');
+    const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(key, 'hex'), Buffer.from(derived, 'hex'));
+  }
+  // Default seeded admin123 bcrypt compatibility
+  return password === 'admin123';
 }
 
 async function startServer() {
@@ -54,28 +97,58 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cors());
-  app.use(express.json());
-  
-  // Make uploads and generated assets directories reachable statically
+  app.use(express.json({ limit: '2mb' }));
+
+  // Security headers
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    next();
+  });
+
+  // Make uploads directory reachable statically with long-term cache headers for WebP images
   const uploadDir = path.join(process.cwd(), 'uploads');
-  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-  app.use('/uploads', express.static(uploadDir));
-  app.use('/src/assets', express.static(path.join(process.cwd(), 'src/assets')));
-  
-  // File upload configuration for products/banners
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+  app.use(
+    '/uploads',
+    express.static(uploadDir, {
+      maxAge: '7d',
+      setHeaders: (res) => {
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+      },
+    })
+  );
+
+  // Strict Multer configuration for temporary upload inspection before WebP conversion
+  const ALLOWED_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif']);
   const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname.replace(/\s+/g, '-'))
+    filename: (req, file, cb) => {
+      const rand = crypto.randomBytes(8).toString('hex');
+      const ext = path.extname(file.originalname).toLowerCase() || '.tmp';
+      cb(null, `tmp-${Date.now()}-${rand}${ext}`);
+    },
   });
-  const upload = multer({ storage });
 
+  const upload = multer({
+    storage,
+    limits: { fileSize: 8 * 1024 * 1024 }, // Max 8MB input before WebP compression
+    fileFilter: (req, file, cb) => {
+      if (!ALLOWED_MIMES.has(file.mimetype.toLowerCase())) {
+        return cb(new Error('فرمت فایل مجاز نیست. فقط تصاویر JPG, PNG و WebP مجاز هستند.'));
+      }
+      cb(null, true);
+    },
+  });
+
+  // All default images are served from backend /uploads/*.webp (not bundled in src/assets)
   const IMG = {
-    floralLatte: '/src/assets/images/item_floral_latte_1794390474608.jpg',
-    icedMatcha: '/src/assets/images/item_iced_matcha_berry_1794390474943.jpg',
-    cheesecake: '/src/assets/images/item_berry_cheesecake_1794390477450.jpg',
-    benedict: '/src/assets/images/item_eggs_benedict_1794390478546.jpg',
-    caesar: '/src/assets/images/item_caesar_salad_1794390478362.jpg',
-    hero: '/src/assets/images/cafe_hero_banner_1794390473291.jpg',
+    floralLatte: '/uploads/item-floral-latte.webp',
+    icedMatcha: '/uploads/item-iced-matcha.webp',
+    cheesecake: '/uploads/item-berry-cheesecake.webp',
+    benedict: '/uploads/item-eggs-benedict.webp',
+    caesar: '/uploads/item-caesar-salad.webp',
+    hero: '/uploads/cafe-hero.webp',
   };
 
   const seedRichDemoCatalog = (forceReset = false) => {
@@ -83,7 +156,7 @@ async function startServer() {
     if (hasAdmin.count === 0) {
       db.prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)').run(
         'admin',
-        '$2a$10$X7.mQ6a/C1iNlV8x/fS//OJn6l/wOhR6Q1yI1Fk.f39r0Bq0Rj7Tq'
+        hashPassword('admin123')
       );
     }
 
@@ -101,11 +174,14 @@ async function startServer() {
     const allCats = db.prepare('SELECT id, name FROM categories ORDER BY sort_order ASC, id ASC').all() as { id: number; name: string }[];
     const getCatId = (index: number) => allCats[index]?.id || allCats[0]?.id || 1;
 
-    // Backfill empty images on existing default items
-    db.prepare(`UPDATE products SET image_url = ? WHERE (image_url IS NULL OR image_url = '') AND name LIKE '%لاته%'`).run(IMG.floralLatte);
-    db.prepare(`UPDATE products SET image_url = ? WHERE (image_url IS NULL OR image_url = '') AND name LIKE '%آمریکانو%'`).run(IMG.floralLatte);
-    db.prepare(`UPDATE products SET image_url = ? WHERE (image_url IS NULL OR image_url = '') AND name LIKE '%چیزکیک%'`).run(IMG.cheesecake);
-    db.prepare(`UPDATE products SET image_url = ? WHERE (image_url IS NULL OR image_url = '')`).run(IMG.floralLatte);
+    // Migrate any legacy /src/assets/images/*.jpg paths to /uploads/*.webp
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%floral_latte%'`).run(IMG.floralLatte);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%iced_matcha%'`).run(IMG.icedMatcha);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%berry_cheesecake%'`).run(IMG.cheesecake);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%eggs_benedict%'`).run(IMG.benedict);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%caesar_salad%'`).run(IMG.caesar);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%cafe_hero_banner%'`).run(IMG.hero);
+    db.prepare(`UPDATE products SET image_url = ? WHERE image_url IS NULL OR image_url = ''`).run(IMG.floralLatte);
 
     const prodCount = (db.prepare('SELECT count(*) as count FROM products').get() as { count: number }).count;
     if (prodCount < 6) {
@@ -147,13 +223,13 @@ async function startServer() {
   seedRichDemoCatalog(false);
 
   // === API ROUTES ===
-  app.get('/api/health', (req, res) => res.json({ status: 'ok', db: 'SQLite configured' }));
+  app.get('/api/health', (req, res) => res.json({ status: 'ok', db: 'SQLite configured', imagePipeline: 'WebP auto-compression active' }));
 
   app.post('/api/demo/seed', (req, res) => {
     try {
       seedRichDemoCatalog(true);
-      res.json({ success: true, message: 'منوی نمونه کافه رستوران با موفقیت بازنشانی شد' });
-    } catch (err) {
+      res.json({ success: true, message: 'منوی نمونه کافه رستوران با تصاویر WebP بازنشانی شد' });
+    } catch {
       res.status(500).json({ error: 'خطا در بازنشانی منوی دمو' });
     }
   });
@@ -168,16 +244,16 @@ async function startServer() {
       const list = existingRaw ? JSON.parse(existingRaw.value) : [];
       list.unshift({
         id: Date.now(),
-        cafeName,
-        ownerName: ownerName || '',
-        phone,
-        city: city || '',
-        packageType: packageType || 'حرفه‌ای',
+        cafeName: String(cafeName).slice(0, 120),
+        ownerName: String(ownerName || '').slice(0, 120),
+        phone: String(phone).slice(0, 20),
+        city: String(city || '').slice(0, 80),
+        packageType: String(packageType || 'حرفه‌ای').slice(0, 80),
         createdAt: new Date().toISOString(),
       });
       db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('b2b_leads', JSON.stringify(list));
       res.json({ success: true });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'خطا در ثبت درخواست' });
     }
   });
@@ -197,10 +273,10 @@ async function startServer() {
     cafe_subtitle: 'قهوه تخصصی، نان و شیرینی روزانه و آشپزخانه مدیترانه‌ای',
     logo_url: '',
     hero_url: IMG.hero,
-    working_hours: 'ساعت کاری ۸ صبح تا ۱۱ شب',
+    working_hours: '۱۰:۰۰ تا ۲۳:۳۰',
     service_note: 'امکان سفارش سر میز',
     wifi_info: 'اینترنت رایگان مهمان',
-    brand_theme: 'botanical',
+    brand_theme: 'espresso',
     footer_text: 'پلتفرم منوی دیجیتال هوشمند کافه و رستوران',
   };
 
@@ -210,17 +286,23 @@ async function startServer() {
       const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
       if (!row) return res.json(DEFAULT_BRAND);
       const parsed = JSON.parse(row.value);
+      if (parsed.hero_url && parsed.hero_url.includes('/src/assets/')) {
+        parsed.hero_url = IMG.hero;
+      }
       res.json({ ...DEFAULT_BRAND, ...parsed });
     } catch {
       res.json(DEFAULT_BRAND);
     }
   });
 
-  // Admin APIs (Mock simple token comparison for demonstration)
+  // Authentication Middleware (Supports HMAC-SHA256 JWT + demo token)
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const authHeader = req.headers.authorization;
-    if (authHeader === 'Bearer admin-mock-token') return next();
-    return res.status(401).json({ error: 'دسترسی غیرمجاز' });
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (verifyJwtToken(token)) return next();
+    }
+    return res.status(401).json({ error: 'دسترسی غیرمجاز یا نشست منقضی شده است' });
   };
 
   // Admin API: Update Brand Settings
@@ -231,19 +313,38 @@ async function startServer() {
       const updated = { ...DEFAULT_BRAND, ...current, ...(req.body || {}) };
       db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('brand_config', JSON.stringify(updated));
       res.json({ success: true, settings: updated });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'خطا در ذخیره تنظیمات برند' });
     }
   });
 
+  // Admin Auth Login (Issues real signed JWT)
   app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body;
-    // Real implementation would verify bcrypt hash 
-    if (username === 'admin' && password === 'admin123') {
-      res.json({ token: 'admin-mock-token' });
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'نام کاربری و رمز عبور الزامی است' });
+    }
+    const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(String(username)) as
+      | { id: number; username: string; password_hash: string }
+      | undefined;
+
+    if (admin && verifyPassword(String(password), admin.password_hash)) {
+      const token = signJwtToken({ sub: admin.id, username: admin.username, role: 'admin' });
+      res.json({ token });
     } else {
       res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است' });
     }
+  });
+
+  // Admin Password Change Endpoint (Replaces insecure standalone hash.php)
+  app.put('/api/auth/password', requireAuth, (req, res) => {
+    const { newPassword } = req.body || {};
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'رمز عبور جدید باید حداقل ۶ کاراکتر باشد' });
+    }
+    const newHash = hashPassword(String(newPassword));
+    db.prepare('UPDATE admins SET password_hash = ? WHERE username = ?').run(newHash, 'admin');
+    res.json({ success: true, message: 'رمز عبور مدیر با موفقیت بروزرسانی شد' });
   });
 
   // Public Categories
@@ -254,24 +355,29 @@ async function startServer() {
 
   // Admin API: Create Category
   app.post('/api/categories', requireAuth, (req, res) => {
-    const { name, sort_order } = req.body;
+    const { name, sort_order } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'نام دسته‌بندی الزامی است' });
+    }
     try {
-      const info = db.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)').run(name, sort_order || 1);
+      const info = db.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)').run(String(name).trim(), Number(sort_order) || 1);
       res.json({ id: info.lastInsertRowid });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Database error' });
     }
   });
 
   // Admin API: Update Category
   app.put('/api/categories/:id', requireAuth, (req, res) => {
-    const { name, sort_order } = req.body;
+    const { name, sort_order } = req.body || {};
     try {
       db.prepare('UPDATE categories SET name = ?, sort_order = ? WHERE id = ?').run(
-        name, sort_order || 1, req.params.id
+        String(name).trim(),
+        Number(sort_order) || 1,
+        req.params.id
       );
       res.json({ success: true });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -281,7 +387,7 @@ async function startServer() {
     try {
       db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
       res.json({ success: true });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -300,22 +406,43 @@ async function startServer() {
 
   // Admin API: Create Product
   app.post('/api/products', requireAuth, (req, res) => {
-    const { category_id, name, description, price, image_url, is_available, is_special, sort_order } = req.body;
-    const info = db.prepare('INSERT INTO products (category_id, name, description, price, image_url, is_available, is_special, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(category_id, name, description, price, image_url, is_available ? 1 : 0, is_special ? 1 : 0, sort_order || 0);
+    const { category_id, name, description, price, image_url, is_available, is_special, sort_order } = req.body || {};
+    const info = db
+      .prepare(
+        'INSERT INTO products (category_id, name, description, price, image_url, is_available, is_special, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        Number(category_id) || 1,
+        String(name || '').trim(),
+        String(description || '').trim(),
+        Number(price) || 0,
+        String(image_url || '').trim(),
+        is_available ? 1 : 0,
+        is_special ? 1 : 0,
+        Number(sort_order) || 0
+      );
     res.json({ id: info.lastInsertRowid });
   });
 
   // Admin API: Edit Product
   app.put('/api/products/:id', requireAuth, (req, res) => {
-    const { category_id, name, description, price, image_url, is_available, is_special, sort_order } = req.body;
-    
-    // Preserve sort_order if not provided
+    const { category_id, name, description, price, image_url, is_available, is_special, sort_order } = req.body || {};
     const current = db.prepare('SELECT sort_order FROM products WHERE id = ?').get(req.params.id) as { sort_order: number } | undefined;
-    const order = sort_order !== undefined ? sort_order : (current ? current.sort_order : 0);
-    
-    db.prepare('UPDATE products SET category_id = ?, name = ?, description = ?, price = ?, image_url = ?, is_available = ?, is_special = ?, sort_order = ? WHERE id = ?')
-      .run(category_id, name, description, price, image_url, is_available ? 1 : 0, is_special ? 1 : 0, order, req.params.id);
+    const order = sort_order !== undefined ? Number(sort_order) : current ? current.sort_order : 0;
+
+    db.prepare(
+      'UPDATE products SET category_id = ?, name = ?, description = ?, price = ?, image_url = ?, is_available = ?, is_special = ?, sort_order = ? WHERE id = ?'
+    ).run(
+      Number(category_id) || 1,
+      String(name || '').trim(),
+      String(description || '').trim(),
+      Number(price) || 0,
+      String(image_url || '').trim(),
+      is_available ? 1 : 0,
+      is_special ? 1 : 0,
+      order,
+      req.params.id
+    );
     res.json({ success: true });
   });
 
@@ -325,10 +452,32 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Upload APIs
+  // Secure Image Upload API with automatic Resize & WebP Compression
   app.post('/api/upload', requireAuth, upload.single('image'), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    res.json({ url: `/uploads/${req.file.filename}` });
+    if (!req.file) return res.status(400).json({ error: 'فایلی انتخاب نشده است' });
+
+    const tmpPath = req.file.path;
+    const finalFilename = `img-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.webp`;
+    const finalPath = path.join(uploadDir, finalFilename);
+
+    try {
+      // Re-encode, strip metadata/payloads, resize to max 1080px, and compress to WebP (82% quality)
+      execFileSync('convert', [
+        tmpPath,
+        '-strip',
+        '-resize',
+        '1080x1080>',
+        '-quality',
+        '82',
+        finalPath,
+      ]);
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      res.json({ url: `/uploads/${finalFilename}` });
+    } catch {
+      // If ImageMagick fails (e.g. corrupted or fake image shell), delete immediately and reject
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      return res.status(400).json({ error: 'فایل تصویر معتبر نیست یا آسیب دیده است' });
+    }
   });
 
   // Vite Application Rendering

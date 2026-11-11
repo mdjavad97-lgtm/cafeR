@@ -2,12 +2,12 @@ import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 
 export const GENERATED_IMAGES = {
-  hero: '/src/assets/images/cafe_hero_banner_1794390473291.jpg',
-  floralLatte: '/src/assets/images/item_floral_latte_1794390474608.jpg',
-  icedMatcha: '/src/assets/images/item_iced_matcha_berry_1794390474943.jpg',
-  cheesecake: '/src/assets/images/item_berry_cheesecake_1794390477450.jpg',
-  benedict: '/src/assets/images/item_eggs_benedict_1794390478546.jpg',
-  caesar: '/src/assets/images/item_caesar_salad_1794390478362.jpg',
+  hero: '/uploads/cafe-hero.webp',
+  floralLatte: '/uploads/item-floral-latte.webp',
+  icedMatcha: '/uploads/item-iced-matcha.webp',
+  cheesecake: '/uploads/item-berry-cheesecake.webp',
+  benedict: '/uploads/item-eggs-benedict.webp',
+  caesar: '/uploads/item-caesar-salad.webp',
 };
 
 export interface BrandSettings {

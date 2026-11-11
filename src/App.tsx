@@ -3,7 +3,6 @@ import { Toaster } from 'sonner';
 
 import Home from './pages/Home';
 import ProductDetails from './pages/ProductDetails';
-import PitchPage from './pages/PitchPage';
 import AdminLogin from './pages/AdminLogin';
 import AdminLayout from './pages/AdminLayout';
 import AdminDashboard from './pages/AdminDashboard';
@@ -17,7 +16,6 @@ export default function App() {
         {/* Public Menu App */}
         <Route path="/" element={<Home />} />
         <Route path="/product/:id" element={<ProductDetails />} />
-        <Route path="/pitch" element={<PitchPage />} />
 
         {/* Admin Dashboard */}
         <Route path="/log" element={<AdminLogin />} />

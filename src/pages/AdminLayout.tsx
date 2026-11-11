@@ -55,11 +55,7 @@ export default function AdminLayout() {
         <div className="mx-4 my-6 border-t border-gray-100"></div>
         <button onClick={() => navigate('/')} className="flex w-full items-center gap-3 px-4 py-3 text-gray-600 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer">
           <Home size={20} />
-          مشاهده منوی مشتری
-        </button>
-        <button onClick={() => navigate('/pitch')} className="flex w-full items-center gap-3 px-4 py-3 text-primary bg-primary/5 hover:bg-primary/10 rounded-xl font-medium transition-colors cursor-pointer">
-          <Grid size={20} />
-          صفحه معرفی و فروش (B2B)
+          مشاهده منوی کافه
         </button>
       </nav>
       <div className="p-4 border-t border-gray-100">
