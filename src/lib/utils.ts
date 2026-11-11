@@ -51,6 +51,13 @@ export function formatPrice(price: number): string {
 }
 
 /**
+ * Format price numeric value only in Persian numerals (for separated unit styling)
+ */
+export function formatPriceNumber(price: number): string {
+  return new Intl.NumberFormat('fa-IR').format(price);
+}
+
+/**
  * Resolve product image with smart category-aware fallback to generated studio photography
  */
 export function resolveProductImage(imageUrl?: string | null, name = '', categoryId = 1): string {
