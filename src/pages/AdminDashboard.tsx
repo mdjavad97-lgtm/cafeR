@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
-import { Plus, Trash2, Edit2, Image as ImageIcon, CheckCircle, XCircle, Search, ChevronRight, ChevronLeft, X, ArrowUp, ArrowDown, RotateCcw, Settings, BellRing } from 'lucide-react';
+import { Plus, Trash2, Edit2, Image as ImageIcon, CheckCircle, XCircle, Search, ChevronRight, ChevronLeft, X, ArrowUp, ArrowDown, Settings, BellRing } from 'lucide-react';
 import { formatPrice, resolveProductImage, GENERATED_IMAGES, BrandSettings, DEFAULT_BRAND_SETTINGS, convertImageFileToWebP } from '../lib/utils';
 
 type Category = { id: number; name: string; sort_order?: number };
@@ -71,11 +71,22 @@ export default function AdminDashboard() {
     return () => clearInterval(interval);
   }, []);
 
+  const handleUnauthorized = () => {
+    localStorage.removeItem('admin_token');
+    window.location.href = `${import.meta.env.BASE_URL}log`;
+  };
+
   const fetchTableCalls = () => {
     fetch(`${import.meta.env.BASE_URL}api/notifications/table-call`, {
       headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') },
     })
-      .then(r => (r.ok ? r.json() : []))
+      .then(r => {
+        if (r.status === 401) {
+          handleUnauthorized();
+          return [];
+        }
+        return r.ok ? r.json() : [];
+      })
       .then(data => {
         if (Array.isArray(data)) setTableCalls(data);
       })
@@ -86,8 +97,17 @@ export default function AdminDashboard() {
     fetch(`${import.meta.env.BASE_URL}api/products`).then(r => r.json()).then(setProducts);
     fetch(`${import.meta.env.BASE_URL}api/categories`).then(r => r.json()).then(setCategories);
     fetchTableCalls();
-    fetch(`${import.meta.env.BASE_URL}api/settings`)
-      .then(r => r.json())
+    // Authenticated endpoint: includes private notification credentials for the admin form
+    fetch(`${import.meta.env.BASE_URL}api/admin/settings`, {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') },
+    })
+      .then(r => {
+        if (r.status === 401) {
+          handleUnauthorized();
+          return null;
+        }
+        return r.ok ? r.json() : null;
+      })
       .then(data => {
         if (data && data.cafe_name) {
           setBrandSettings({ ...DEFAULT_BRAND_SETTINGS, ...data });
@@ -199,20 +219,6 @@ export default function AdminDashboard() {
       toast.error('خطای شبکه');
     } finally {
       setSavingBrand(false);
-    }
-  };
-
-  const handleResetDemoCatalog = async () => {
-    try {
-      const res = await fetch(`${import.meta.env.BASE_URL}api/demo/seed`, { method: 'POST' });
-      if (res.ok) {
-        toast.success('منوی نمونه ۱۲ آیتمی با عکس‌های استودیویی بازنشانی شد');
-        fetchData();
-      } else {
-        toast.error('خطا در بازنشانی منوی نمونه');
-      }
-    } catch {
-      toast.error('خطا در ارتباط با سرور');
     }
   };
 
@@ -598,14 +604,6 @@ export default function AdminDashboard() {
             >
               <Settings size={16} />
               تنظیمات برند و لوگو
-            </button>
-            <button
-              onClick={handleResetDemoCatalog}
-              className="flex items-center gap-1.5 bg-amber-50 text-amber-800 px-3 md:px-4 py-2 md:py-2.5 rounded-xl text-xs whitespace-nowrap font-medium hover:bg-amber-100 border border-amber-200 transition-all cursor-pointer"
-              title="بازگردانی ۱۲ آیتم نمونه با عکس‌های حرفه‌ای برای پرزنت به مشتری جدید"
-            >
-              <RotateCcw size={15} />
-              بازنشانی منوی دمو
             </button>
             <button 
               onClick={() => setIsManagingCategories(true)}
@@ -1080,7 +1078,7 @@ export default function AdminDashboard() {
                 <input value={formData.name} onChange={e=>setFormData({...formData, name: e.target.value})} type="text" className="w-full px-4 py-2 border rounded-lg focus:ring-primary focus:border-primary" required />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">قیمت (تومان) *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">قیمت (هزار تومان) *</label>
                 <input value={formData.price} onChange={e=>setFormData({...formData, price: e.target.value})} type="number" dir="ltr" className="w-full px-4 py-2 border rounded-lg focus:ring-primary focus:border-primary text-left" required />
               </div>
               <div className="md:col-span-2">

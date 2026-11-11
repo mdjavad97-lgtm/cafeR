@@ -54,10 +54,17 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * Format price in Toman using Persian numerals
+ * Currency unit convention for the whole platform.
+ * Prices are stored as "thousand Toman" (e.g. 145 means 145,000 Toman),
+ * which is how Iranian cafe/restaurant owners actually write menu prices.
+ */
+export const PRICE_UNIT_LABEL = 'هزار تومان';
+
+/**
+ * Format price in thousand-Toman units using Persian numerals
  */
 export function formatPrice(price: number): string {
-  return new Intl.NumberFormat('fa-IR').format(price) + ' تومان';
+  return new Intl.NumberFormat('fa-IR').format(price) + ' ' + PRICE_UNIT_LABEL;
 }
 
 /**

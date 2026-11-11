@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowRight, X, ZoomIn, Star } from 'lucide-react';
-import { formatPriceNumber, GENERATED_IMAGES, resolveProductImage } from '../lib/utils';
+import { ArrowRight, X, ZoomIn } from 'lucide-react';
+import { formatPriceNumber, PRICE_UNIT_LABEL, resolveProductImage } from '../lib/utils';
 
 export default function ProductDetails() {
   const { id } = useParams();
@@ -91,10 +91,6 @@ export default function ProductDetails() {
             ) : (
               <span className="text-xs text-text-muted">تهیه روزانه</span>
             )}
-            <div className="flex items-center gap-1 text-amber-600 text-xs font-bold">
-              <span className="tabular-nums">۴.۹</span>
-              <Star size={14} className="fill-amber-500 text-amber-500" />
-            </div>
           </div>
 
           <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-text-main">
@@ -118,7 +114,7 @@ export default function ProductDetails() {
                 {formatPriceNumber(product.price)}
               </span>
               <span className="text-sm font-medium text-text-muted">
-                تومان
+                {PRICE_UNIT_LABEL}
               </span>
             </div>
           </div>

@@ -21,7 +21,7 @@ import { toast } from 'sonner';
 import {
   cn,
   formatPriceNumber,
-  GENERATED_IMAGES,
+  PRICE_UNIT_LABEL,
   resolveProductImage,
   BrandSettings,
   DEFAULT_BRAND_SETTINGS,
@@ -84,30 +84,62 @@ export default function Home() {
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
   }, [isDark]);
 
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
   useEffect(() => {
-    Promise.all([
-      fetch(`${import.meta.env.BASE_URL}api/categories`).then((r) => r.json()),
-      fetch(`${import.meta.env.BASE_URL}api/products`).then((r) => r.json()),
-      fetch(`${import.meta.env.BASE_URL}api/settings`)
-        .then((r) => r.json())
-        .catch(() => DEFAULT_BRAND_SETTINGS),
-    ]).then(([cats, prods, settingsData]) => {
-      setCategories(cats);
-      setProducts(prods);
-      if (settingsData && settingsData.cafe_name) {
-        setBrand({ ...DEFAULT_BRAND_SETTINGS, ...settingsData });
-        const root = window.document.documentElement;
-        const theme = settingsData.brand_theme || 'espresso';
-        if (theme === 'botanical') {
-          root.removeAttribute('data-brand');
-        } else {
-          root.setAttribute('data-brand', theme);
+    let alive = true;
+    setLoading(true);
+    setLoadError(false);
+
+    const load = async () => {
+      try {
+        const [catsRes, prodsRes, settingsRes] = await Promise.all([
+          fetch(`${import.meta.env.BASE_URL}api/categories`),
+          fetch(`${import.meta.env.BASE_URL}api/products`),
+          fetch(`${import.meta.env.BASE_URL}api/settings`).catch(() => null),
+        ]);
+
+        if (!catsRes.ok || !prodsRes.ok) {
+          throw new Error(`API error ${catsRes.status}/${prodsRes.status}`);
         }
-        document.title = `${settingsData.cafe_name} | منوی دیجیتال`;
+
+        const [cats, prods] = await Promise.all([catsRes.json(), prodsRes.json()]);
+        if (!Array.isArray(cats) || !Array.isArray(prods)) {
+          throw new Error('Malformed API response');
+        }
+
+        const settingsData =
+          settingsRes && settingsRes.ok ? await settingsRes.json().catch(() => null) : null;
+
+        if (!alive) return;
+        setCategories(cats);
+        setProducts(prods);
+
+        if (settingsData && settingsData.cafe_name) {
+          setBrand({ ...DEFAULT_BRAND_SETTINGS, ...settingsData });
+          const root = window.document.documentElement;
+          const theme = settingsData.brand_theme || 'espresso';
+          if (theme === 'botanical') {
+            root.removeAttribute('data-brand');
+          } else {
+            root.setAttribute('data-brand', theme);
+          }
+          document.title = `${settingsData.cafe_name} | منوی دیجیتال`;
+        }
+      } catch (err) {
+        console.error('Failed to load menu', err);
+        if (alive) setLoadError(true);
+      } finally {
+        if (alive) setLoading(false);
       }
-      setLoading(false);
-    });
-  }, []);
+    };
+
+    load();
+    return () => {
+      alive = false;
+    };
+  }, [reloadKey]);
 
   const availableProducts = products.filter((p) => p.is_available !== 0);
 
@@ -128,11 +160,7 @@ export default function Home() {
     return p.category_id === activeTab;
   });
 
-  const resolveImageUrl = (url?: string) => {
-    if (!url) return '';
-    if (url.startsWith('http') || url.startsWith('/uploads/')) return url;
-    return `${import.meta.env.BASE_URL}${url.replace(/^\//, '')}`;
-  };
+  const resolveImageUrl = (url?: string) => resolveProductImage(url);
 
   const handleSendTableCall = async (e: FormEvent) => {
     e.preventDefault();
@@ -170,6 +198,24 @@ export default function Home() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg-base">
         <Loader2 className="w-10 h-10 text-primary animate-spin" />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-bg-base px-6 text-center" dir="rtl">
+        <Coffee className="w-12 h-12 text-text-muted opacity-40 mb-4" />
+        <h1 className="text-lg font-extrabold text-text-main mb-2">منو در دسترس نیست</h1>
+        <p className="text-sm text-text-muted mb-6 max-w-xs leading-relaxed">
+          ارتباط با سرور برقرار نشد. لطفاً اتصال اینترنت خود را بررسی کنید و دوباره تلاش کنید.
+        </p>
+        <button
+          onClick={() => setReloadKey((k) => k + 1)}
+          className="px-6 py-3 rounded-xl bg-[#2C1810] dark:bg-primary text-white text-xs font-bold hover:opacity-95 transition-opacity cursor-pointer"
+        >
+          تلاش دوباره
+        </button>
       </div>
     );
   }
@@ -226,7 +272,7 @@ export default function Home() {
                 {formatPriceNumber(product.price)}
               </span>
               <span className="text-[11px] font-medium text-text-muted">
-                تومان
+                {PRICE_UNIT_LABEL}
               </span>
             </div>
           </div>
@@ -277,15 +323,11 @@ export default function Home() {
             </div>
           )}
 
-          {/* Title + Rating Row */}
+          {/* Title Row */}
           <div className="flex items-center justify-between gap-2 mb-1.5">
             <h3 className="font-extrabold text-base sm:text-lg text-text-main truncate">
               {product.name}
             </h3>
-            <div className="flex items-center gap-1 text-amber-600 text-xs font-bold shrink-0">
-              <span className="tabular-nums">۴.۹</span>
-              <Star size={13} className="fill-amber-500 text-amber-500" />
-            </div>
           </div>
 
           {/* Description */}
@@ -302,7 +344,7 @@ export default function Home() {
               {formatPriceNumber(product.price)}
             </span>
             <span className="text-xs font-medium text-text-muted">
-              تومان
+              {PRICE_UNIT_LABEL}
             </span>
           </div>
         </div>
@@ -457,7 +499,7 @@ export default function Home() {
                   <span className="text-lg sm:text-xl font-extrabold text-white tabular-nums">
                     {formatPriceNumber(spotlightProduct.price)}
                   </span>
-                  <span className="text-xs text-white/80 font-medium">تومان</span>
+                  <span className="text-xs text-white/80 font-medium">{PRICE_UNIT_LABEL}</span>
                 </div>
                 <span className="text-xs text-[#FDE68A] font-semibold flex items-center gap-0.5">
                   <span>مشاهده جزئیات</span>
