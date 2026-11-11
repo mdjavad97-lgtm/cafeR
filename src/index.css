@@ -1,0 +1,132 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+  --font-poppins: 'Poppins', sans-serif;
+  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  
+  --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-text-main: var(--text-main);
+  --color-text-muted: var(--text-muted);
+  --color-border-subtle: var(--border-subtle);
+}
+
+@layer base {
+  :root {
+    --primary: #5B6346;
+    --secondary: #C87D65;
+    --bg-base: #F8F5F2;
+    --bg-surface: #ffffff;
+    --bg-subtle: #FDFBF7;
+    --text-main: #2D2926;
+    --text-muted: rgba(45, 41, 38, 0.62);
+    --border-subtle: #E9E0D2;
+  }
+
+  :root[data-brand="espresso"] {
+    --primary: #6F4E37;
+    --secondary: #B8860B;
+    --bg-base: #F7F3EE;
+    --bg-surface: #FFFFFF;
+    --bg-subtle: #EFE9E1;
+    --text-main: #231912;
+    --text-muted: rgba(35, 25, 18, 0.62);
+    --border-subtle: #E2D6C8;
+  }
+
+  :root[data-brand="terracotta"] {
+    --primary: #9E4733;
+    --secondary: #D48C46;
+    --bg-base: #FAF5F0;
+    --bg-surface: #FFFFFF;
+    --bg-subtle: #F4EBE2;
+    --text-main: #2B1D19;
+    --text-muted: rgba(43, 29, 25, 0.62);
+    --border-subtle: #E8D8CA;
+  }
+
+  :root[data-brand="royal"] {
+    --primary: #1E3A5F;
+    --secondary: #B48A4E;
+    --bg-base: #F4F6F9;
+    --bg-surface: #FFFFFF;
+    --bg-subtle: #EBF0F5;
+    --text-main: #111D2C;
+    --text-muted: rgba(17, 29, 44, 0.62);
+    --border-subtle: #DAE2EC;
+  }
+
+  .dark {
+    --primary: #9CA894;
+    --secondary: #C87D65;
+    --bg-base: #161B15;
+    --bg-surface: #1F261D;
+    --bg-subtle: #1A2018;
+    --text-main: #F1F5F9;
+    --text-muted: rgba(241, 245, 249, 0.65);
+    --border-subtle: #2F392C;
+  }
+
+  .dark[data-brand="espresso"] {
+    --primary: #C89F7B;
+    --secondary: #D4A359;
+    --bg-base: #17120E;
+    --bg-surface: #221B15;
+    --bg-subtle: #1C1611;
+    --text-main: #F5EFEA;
+    --text-muted: rgba(245, 239, 234, 0.65);
+    --border-subtle: #362B22;
+  }
+
+  .dark[data-brand="terracotta"] {
+    --primary: #DF8068;
+    --secondary: #E5A963;
+    --bg-base: #1A1311;
+    --bg-surface: #261C19;
+    --bg-subtle: #201714;
+    --text-main: #F9F1EE;
+    --text-muted: rgba(249, 241, 238, 0.65);
+    --border-subtle: #3B2B26;
+  }
+
+  .dark[data-brand="royal"] {
+    --primary: #7DA2CE;
+    --secondary: #D4AF6A;
+    --bg-base: #0F1722;
+    --bg-surface: #172232;
+    --bg-subtle: #131C2A;
+    --text-main: #F1F5F9;
+    --text-muted: rgba(241, 245, 249, 0.65);
+    --border-subtle: #26364D;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-bg-surface border border-border-subtle shadow-sm rounded-3xl;
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-main);
+}
+
+/* Hide scrollbar for horizontal category lists but keep scrolling */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
