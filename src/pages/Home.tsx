@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Coffee,
@@ -14,7 +14,10 @@ import {
   Sparkles,
   UtensilsCrossed,
   ChevronLeft,
+  BellRing,
+  CheckCircle2,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   cn,
   formatPriceNumber,
@@ -44,7 +47,11 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<number | 'all'>('all');
   const [loading, setLoading] = useState(true);
   const [qrModalOpen, setQrModalOpen] = useState(false);
+  const [tableCallModalOpen, setTableCallModalOpen] = useState(false);
   const [tableNumber, setTableNumber] = useState('۴');
+  const [requestType, setRequestType] = useState('فراخوان مهماندار');
+  const [requestNote, setRequestNote] = useState('');
+  const [sendingCall, setSendingCall] = useState(false);
 
   const [viewMode, setViewMode] = useState<'list' | 'grid'>(() => {
     if (typeof window === 'undefined') return 'list';
@@ -127,6 +134,38 @@ export default function Home() {
     return `${import.meta.env.BASE_URL}${url.replace(/^\//, '')}`;
   };
 
+  const handleSendTableCall = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!tableNumber.trim()) {
+      toast.error('لطفاً شماره میز خود را وارد کنید');
+      return;
+    }
+    setSendingCall(true);
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}api/notifications/table-call`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          table_number: tableNumber.trim(),
+          request_type: requestType,
+          note: requestNote.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(data.message || 'درخواست شما برای صندوق و مهماندار ارسال شد');
+        setRequestNote('');
+        setTableCallModalOpen(false);
+      } else {
+        toast.error(data.error || 'خطا در ثبت درخواست میز');
+      }
+    } catch {
+      toast.error('خطا در ارتباط با سرور');
+    } finally {
+      setSendingCall(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg-base">
@@ -147,17 +186,20 @@ export default function Home() {
         onClick={() => navigate(`/product/${product.id}`)}
         className="bg-bg-surface border border-border-subtle rounded-3xl p-3.5 sm:p-4 flex items-center gap-3.5 sm:gap-4 cursor-pointer group hover:shadow-md hover:border-primary/35 transition-all overflow-hidden"
       >
-        {/* Right Side (in RTL): Circular / Rounded Image */}
+        {/* Right Side (in RTL): Circular / Rounded Image or Clean Icon Placeholder */}
         <div className="relative w-22 h-22 sm:w-26 sm:h-26 shrink-0">
-          <img
-            src={imgSrc}
-            alt={product.name}
-            referrerPolicy="no-referrer"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).src = GENERATED_IMAGES.floralLatte;
-            }}
-            className="w-full h-full rounded-full object-cover border-2 border-border-subtle group-hover:scale-105 transition-transform duration-500 shadow-2xs"
-          />
+          {imgSrc ? (
+            <img
+              src={imgSrc}
+              alt={product.name}
+              referrerPolicy="no-referrer"
+              className="w-full h-full rounded-full object-cover border-2 border-border-subtle group-hover:scale-105 transition-transform duration-500 shadow-2xs"
+            />
+          ) : (
+            <div className="w-full h-full rounded-full bg-bg-subtle border-2 border-border-subtle flex items-center justify-center text-text-muted">
+              <Coffee size={26} className="opacity-45" />
+            </div>
+          )}
           {product.is_special === 1 && (
             <span className="absolute top-0 right-0 bg-[#3A2218] text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-xs">
               ویژه
@@ -204,25 +246,36 @@ export default function Home() {
         className="bg-bg-surface border border-border-subtle rounded-3xl p-4 sm:p-5 flex flex-col justify-between cursor-pointer group hover:shadow-md hover:border-primary/35 transition-all overflow-hidden"
       >
         <div>
-          {/* Large Top Rounded Image */}
-          <div className="w-full aspect-[16/10] rounded-2xl overflow-hidden relative bg-bg-subtle mb-3.5 border border-border-subtle/60">
-            <img
-              src={imgSrc}
-              alt={product.name}
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).src = GENERATED_IMAGES.floralLatte;
-              }}
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-            />
-            {product.is_special === 1 && (
-              <div className="absolute top-3 right-3">
-                <span className="bg-[#9E4733] text-white text-[11px] font-bold px-3 py-1 rounded-full shadow-sm">
-                  پیشنهاد شف
-                </span>
-              </div>
-            )}
-          </div>
+          {/* Large Top Rounded Image (or Clean Placeholder if image was deleted) */}
+          {imgSrc ? (
+            <div className="w-full aspect-[16/10] rounded-2xl overflow-hidden relative bg-bg-subtle mb-3.5 border border-border-subtle/60">
+              <img
+                src={imgSrc}
+                alt={product.name}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+              />
+              {product.is_special === 1 && (
+                <div className="absolute top-3 right-3">
+                  <span className="bg-[#9E4733] text-white text-[11px] font-bold px-3 py-1 rounded-full shadow-sm">
+                    پیشنهاد شف
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="w-full py-8 rounded-2xl bg-bg-subtle mb-3.5 border border-border-subtle/60 flex flex-col items-center justify-center text-text-muted relative">
+              <Coffee size={32} className="opacity-40 mb-1" />
+              <span className="text-[11px] opacity-60">بدون تصویر</span>
+              {product.is_special === 1 && (
+                <div className="absolute top-3 right-3">
+                  <span className="bg-[#9E4733] text-white text-[11px] font-bold px-3 py-1 rounded-full shadow-sm">
+                    پیشنهاد شف
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Title + Rating Row */}
           <div className="flex items-center justify-between gap-2 mb-1.5">
@@ -298,6 +351,16 @@ export default function Home() {
 
           {/* Left side: Action Circle Buttons */}
           <div className="flex items-center gap-2 shrink-0">
+            {brand.enable_table_calls !== false && (
+              <button
+                onClick={() => setTableCallModalOpen(true)}
+                title="فراخوان مهماندار / سرویس میز"
+                className="relative w-10 h-10 rounded-full bg-bg-surface border border-border-subtle flex items-center justify-center text-text-main hover:border-primary transition-colors cursor-pointer"
+              >
+                <BellRing size={18} />
+                <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-[#C86D3B]" />
+              </button>
+            )}
             <button
               onClick={() => setQrModalOpen(true)}
               title="QR کد میز"
@@ -404,18 +467,20 @@ export default function Home() {
             </div>
 
             {/* Left Circular Image */}
-            <div className="w-24 h-24 sm:w-30 sm:h-30 rounded-full p-1 border-2 border-[#A05A2C]/60 shrink-0 z-10">
-              <img
-                src={resolveProductImage(
-                  spotlightProduct.image_url,
-                  spotlightProduct.name,
-                  spotlightProduct.category_id
-                )}
-                alt={spotlightProduct.name}
-                referrerPolicy="no-referrer"
-                className="w-full h-full rounded-full object-cover"
-              />
-            </div>
+            {spotlightProduct.image_url && (
+              <div className="w-24 h-24 sm:w-30 sm:h-30 rounded-full p-1 border-2 border-[#A05A2C]/60 shrink-0 z-10">
+                <img
+                  src={resolveProductImage(
+                    spotlightProduct.image_url,
+                    spotlightProduct.name,
+                    spotlightProduct.category_id
+                  )}
+                  alt={spotlightProduct.name}
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full rounded-full object-cover"
+                />
+              </div>
+            )}
           </motion.div>
         )}
 
@@ -637,6 +702,114 @@ export default function Home() {
               >
                 چاپ یا ذخیره استند QR میز
               </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Customer Table Service / Call Waiter Modal */}
+      <AnimatePresence>
+        {tableCallModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={() => setTableCallModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-bg-surface border border-border-subtle rounded-3xl p-6 max-w-sm w-full text-right shadow-xl"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-9 h-9 rounded-full bg-[#2C1810] text-white flex items-center justify-center">
+                    <BellRing size={17} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-extrabold text-text-main">
+                      سرویس میز و فراخوان مهماندار
+                    </h3>
+                    <p className="text-[11px] text-text-muted">
+                      ارسال مستقیم اعلان به صندوق و باریستا
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setTableCallModalOpen(false)}
+                  className="w-8 h-8 rounded-full bg-bg-subtle flex items-center justify-center text-text-muted hover:text-text-main cursor-pointer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <form onSubmit={handleSendTableCall} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-text-main mb-1.5">
+                    شماره میز شما *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={tableNumber}
+                    onChange={(e) => setTableNumber(e.target.value)}
+                    placeholder="مثال: ۴ یا تراس ۲"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-bg-base border border-border-subtle text-sm text-center font-extrabold focus:outline-none focus:border-primary"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-text-main mb-1.5">
+                    نوع درخواست
+                  </label>
+                  <div className="grid grid-cols-1 gap-2">
+                    {[
+                      'فراخوان مهماندار برای ثبت سفارش',
+                      'درخواست صورتحساب میز',
+                      'سرویس اضافه (آب، دستمال یا قند)',
+                    ].map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        onClick={() => setRequestType(opt)}
+                        className={cn(
+                          'px-3.5 py-2.5 rounded-xl text-xs font-bold text-right border flex items-center justify-between transition-all cursor-pointer',
+                          requestType === opt
+                            ? 'bg-[#2C1810] text-white border-[#2C1810]'
+                            : 'bg-bg-base text-text-main border-border-subtle hover:border-primary/40'
+                        )}
+                      >
+                        <span>{opt}</span>
+                        {requestType === opt && <CheckCircle2 size={15} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-text-main mb-1.5">
+                    توضیحات اختیاری (یا نام آیتم مدنظر)
+                  </label>
+                  <input
+                    type="text"
+                    value={requestNote}
+                    onChange={(e) => setRequestNote(e.target.value)}
+                    placeholder="مثال: لطفاً یک لیوان آب خنک بیاورید..."
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-bg-base border border-border-subtle text-xs focus:outline-none focus:border-primary"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={sendingCall}
+                  className="w-full py-3 bg-[#2C1810] dark:bg-primary text-white text-xs font-bold rounded-xl hover:opacity-95 transition-opacity cursor-pointer disabled:opacity-50"
+                >
+                  {sendingCall ? 'در حال ارسال اعلان به صندوق...' : 'ارسال درخواست به مهماندار'}
+                </button>
+              </form>
             </motion.div>
           </motion.div>
         )}

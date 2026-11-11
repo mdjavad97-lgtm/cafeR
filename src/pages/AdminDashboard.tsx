@@ -1,10 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
-import { Plus, Trash2, Edit2, Image as ImageIcon, CheckCircle, XCircle, Search, ChevronRight, ChevronLeft, X, ArrowUp, ArrowDown, RotateCcw, Settings } from 'lucide-react';
-import { formatPrice, resolveProductImage, GENERATED_IMAGES, BrandSettings, DEFAULT_BRAND_SETTINGS } from '../lib/utils';
+import { Plus, Trash2, Edit2, Image as ImageIcon, CheckCircle, XCircle, Search, ChevronRight, ChevronLeft, X, ArrowUp, ArrowDown, RotateCcw, Settings, BellRing } from 'lucide-react';
+import { formatPrice, resolveProductImage, GENERATED_IMAGES, BrandSettings, DEFAULT_BRAND_SETTINGS, convertImageFileToWebP } from '../lib/utils';
 
 type Category = { id: number; name: string; sort_order?: number };
+type TableCall = {
+  id: number;
+  table_number: string;
+  request_type: string;
+  note?: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  created_at: string;
+};
 type Product = { 
   id: number; 
   category_id: number; 
@@ -20,6 +28,7 @@ type Product = {
 export default function AdminDashboard() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [tableCalls, setTableCalls] = useState<TableCall[]>([]);
   
   // Search and Pagination
   const [searchQuery, setSearchQuery] = useState('');
@@ -38,8 +47,11 @@ export default function AdminDashboard() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [editingCategory, setEditingCategory] = useState<{id: number, name: string} | null>(null);
   const [editingProductId, setEditingProductId] = useState<number | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [confirmDeleteCatId, setConfirmDeleteCatId] = useState<number | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [webpStats, setWebpStats] = useState<{ originalKB: number; webpKB: number } | null>(null);
   const [formData, setFormData] = useState({
     name: '',
     category_id: 1,
@@ -55,11 +67,25 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchData();
+    const interval = setInterval(fetchTableCalls, 12000);
+    return () => clearInterval(interval);
   }, []);
+
+  const fetchTableCalls = () => {
+    fetch(`${import.meta.env.BASE_URL}api/notifications/table-call`, {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') },
+    })
+      .then(r => (r.ok ? r.json() : []))
+      .then(data => {
+        if (Array.isArray(data)) setTableCalls(data);
+      })
+      .catch(() => {});
+  };
 
   const fetchData = () => {
     fetch(`${import.meta.env.BASE_URL}api/products`).then(r => r.json()).then(setProducts);
     fetch(`${import.meta.env.BASE_URL}api/categories`).then(r => r.json()).then(setCategories);
+    fetchTableCalls();
     fetch(`${import.meta.env.BASE_URL}api/settings`)
       .then(r => r.json())
       .then(data => {
@@ -70,10 +96,31 @@ export default function AdminDashboard() {
       .catch(() => {});
   };
 
+  const handleResolveTableCall = async (id: number) => {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}api/notifications/table-call/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + localStorage.getItem('admin_token'),
+        },
+        body: JSON.stringify({ status: 'completed' }),
+      });
+      if (res.ok) {
+        toast.success('درخواست میز به عنوان انجام‌شده علامت‌گذاری شد');
+        fetchTableCalls();
+      }
+    } catch {
+      toast.error('خطا در بروزرسانی وضعیت میز');
+    }
+  };
+
   const handleBrandImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, field: 'logo_url' | 'hero_url') => {
     if (!e.target.files || !e.target.files[0]) return;
+    const rawFile = e.target.files[0];
+    const { file: webpFile, compressedSize } = await convertImageFileToWebP(rawFile, 1080, 0.82);
     const fData = new FormData();
-    fData.append('image', e.target.files[0]);
+    fData.append('image', webpFile);
     try {
       const res = await fetch(`${import.meta.env.BASE_URL}api/upload`, {
         method: 'POST',
@@ -82,8 +129,24 @@ export default function AdminDashboard() {
       });
       const data = await res.json();
       if (res.ok && data.url) {
+        const prevUrl = brandSettings[field];
         setBrandSettings(prev => ({ ...prev, [field]: data.url }));
-        toast.success(field === 'logo_url' ? 'لوگوی کافه آپلود شد' : 'تصویر بنر هدر آپلود شد');
+        if (prevUrl && prevUrl !== data.url && prevUrl !== GENERATED_IMAGES.hero) {
+          fetch(`${import.meta.env.BASE_URL}api/upload`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + localStorage.getItem('admin_token'),
+            },
+            body: JSON.stringify({ url: prevUrl }),
+          }).catch(() => {});
+        }
+        const kb = Math.max(1, Math.round((data.size || compressedSize) / 1024));
+        toast.success(
+          field === 'logo_url'
+            ? `لوگوی کافه به فرمت WebP (${kb} کیلوبایت) آپلود شد`
+            : `بنر هدر به فرمت WebP (${kb} کیلوبایت) آپلود شد`
+        );
       } else {
         toast.error(data.error || 'خطا در آپلود تصویر');
       }
@@ -153,11 +216,17 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const f = e.target.files[0];
-      setFile(f);
-      setPreview(URL.createObjectURL(f));
+      const rawFile = e.target.files[0];
+      const { file: webpFile, originalSize, compressedSize } = await convertImageFileToWebP(rawFile, 1080, 0.82);
+      setFile(webpFile);
+      setPreview(URL.createObjectURL(webpFile));
+      setWebpStats({
+        originalKB: Math.max(1, Math.round(originalSize / 1024)),
+        webpKB: Math.max(1, Math.round(compressedSize / 1024)),
+      });
+      toast.success(`تصویر به صورت خودکار به WebP فشرده تبدیل شد (${Math.max(1, Math.round(compressedSize / 1024))} کیلوبایت)`);
     }
   };
 
@@ -169,6 +238,7 @@ export default function AdminDashboard() {
     setFormData({ name: '', category_id: categories[0]?.id || 1, description: '', price: '', is_special: false, is_available: true, sort_order: 0 });
     setFile(null);
     setPreview(null);
+    setWebpStats(null);
   };
 
   const handleAddCategorySubmit = async (e: React.FormEvent) => {
@@ -268,14 +338,14 @@ export default function AdminDashboard() {
   };
 
   const handleDeleteCategory = async (id: number) => {
-    if(!confirm('آیا از حذف این دسته‌بندی اطمینان دارید؟ تمام محصولات این دسته بدون دسته خواهند شد.')) return;
     try {
       const res = await fetch(`${import.meta.env.BASE_URL}api/categories/${id}`, {
         method: 'DELETE',
         headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') }
       });
       if (res.ok) {
-        toast.success('دسته‌بندی حذف شد');
+        toast.success('دسته‌بندی و تصاویر بلااستفاده آن به طور کامل حذف شدند');
+        setConfirmDeleteCatId(null);
         fetchData();
       } else {
         toast.error('خطا در حذف دسته‌بندی');
@@ -299,21 +369,57 @@ export default function AdminDashboard() {
     });
     setPreview(product.image_url || null);
     setFile(null);
-    // Scroll to top
+    setWebpStats(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleDelete = async (id: number) => {
-    if(!confirm('آیا از حذف این محصول اطمینان دارید؟')) return;
-    const res = await fetch(`${import.meta.env.BASE_URL}api/products/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') }
-    });
-    if (res.ok) {
-      toast.success('محصول با موفقیت حذف شد');
-      fetchData();
+  const handleDeleteProductImage = async (productId?: number | null) => {
+    // If editing an existing product in the database, delete its image record from DB AND physical file from /uploads/
+    if (productId) {
+      try {
+        const res = await fetch(`${import.meta.env.BASE_URL}api/products/${productId}/image`, {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') },
+        });
+        if (res.ok) {
+          setPreview(null);
+          setFile(null);
+          setWebpStats(null);
+          if (fileInputRef.current) fileInputRef.current.value = '';
+          toast.success('تصویر محصول از دیتابیس و حافظه سرور به طور کامل پاک شد');
+          fetchData();
+        } else {
+          toast.error('خطا در حذف تصویر محصول');
+        }
+      } catch {
+        toast.error('خطا در ارتباط با سرور');
+      }
     } else {
-      toast.error('خطا در حذف محصول');
+      // Unsaved preview in Add Product form
+      setPreview(null);
+      setFile(null);
+      setWebpStats(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      toast.success('تصویر انتخابی حذف شد');
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}api/products/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer ' + localStorage.getItem('admin_token') }
+      });
+      if (res.ok) {
+        toast.success('محصول و فایل تصویر آن از دیتابیس و سرور به طور کامل حذف شد');
+        setConfirmDeleteId(null);
+        if (editingProductId === id) resetForm();
+        fetchData();
+      } else {
+        toast.error('خطا در حذف محصول');
+      }
+    } catch {
+      toast.error('خطا در ارتباط با سرور');
     }
   };
 
@@ -709,6 +815,84 @@ export default function AdminDashboard() {
               </div>
             </div>
 
+            {/* Messenger & Table Call Notification Service (NotificationService.php) */}
+            <div className="pt-3 border-t border-gray-100 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-bold text-gray-800">سرویس فراخوان مهماندار و اعلان پیام‌رسان (NotificationService)</p>
+                  <p className="text-[11px] text-gray-500">ارسال آنی درخواست‌های سر میز مشتریان به تلگرام، بله یا وب‌هوک صندوق</p>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={brandSettings.enable_table_calls !== false}
+                    onChange={e => setBrandSettings({ ...brandSettings, enable_table_calls: e.target.checked })}
+                    className="rounded text-primary focus:ring-primary h-4 w-4"
+                  />
+                  <span className="text-xs font-medium text-gray-700">فعال در منوی مشتری</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-600 mb-1">درگاه پیام‌رسان</label>
+                  <select
+                    value={brandSettings.notification_provider || 'telegram'}
+                    onChange={e =>
+                      setBrandSettings({
+                        ...brandSettings,
+                        notification_provider: e.target.value as 'telegram' | 'bale' | 'webhook',
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white"
+                  >
+                    <option value="telegram">ربات تلگرام (Telegram Bot)</option>
+                    <option value="bale">پیام‌رسان بله (Bale Bot)</option>
+                    <option value="webhook">وب‌هوک اختصاصی (Webhook JSON)</option>
+                  </select>
+                </div>
+
+                {brandSettings.notification_provider === 'webhook' ? (
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] font-semibold text-gray-600 mb-1">آدرس وب‌هوک (Webhook URL)</label>
+                    <input
+                      type="url"
+                      dir="ltr"
+                      value={brandSettings.notification_webhook_url || ''}
+                      onChange={e => setBrandSettings({ ...brandSettings, notification_webhook_url: e.target.value })}
+                      placeholder="https://your-pos-server.local/webhook/table-call"
+                      className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs text-left"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-gray-600 mb-1">توکن ربات (Bot Token)</label>
+                      <input
+                        type="text"
+                        dir="ltr"
+                        value={brandSettings.notification_bot_token || ''}
+                        onChange={e => setBrandSettings({ ...brandSettings, notification_bot_token: e.target.value })}
+                        placeholder="123456789:ABCdefGHIjklMNO..."
+                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs text-left"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-gray-600 mb-1">شناسه چت / گروه (Chat ID)</label>
+                      <input
+                        type="text"
+                        dir="ltr"
+                        value={brandSettings.notification_chat_id || ''}
+                        onChange={e => setBrandSettings({ ...brandSettings, notification_chat_id: e.target.value })}
+                        placeholder="-100123456789"
+                        className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs text-left"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
             {/* Admin Password Update (Replaces standalone hash.php) */}
             <div className="pt-3 border-t border-gray-100">
               <label className="block text-xs font-semibold text-gray-700 mb-1">
@@ -741,6 +925,45 @@ export default function AdminDashboard() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Live Incoming Table Calls Panel */}
+      {tableCalls.filter(c => c.status === 'pending').length > 0 && (
+        <div className="bg-amber-50/90 border border-amber-200 rounded-2xl p-4 mb-6 shadow-xs">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-amber-900 font-bold text-sm">
+              <BellRing size={18} className="text-amber-600 animate-bounce" />
+              <span>درخواست‌های فعال سر میز ({tableCalls.filter(c => c.status === 'pending').length})</span>
+            </div>
+            <span className="text-[11px] text-amber-700">بروزرسانی خودکار</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {tableCalls
+              .filter(c => c.status === 'pending')
+              .map(call => (
+                <div
+                  key={call.id}
+                  className="bg-white border border-amber-200 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-2xs"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 bg-amber-900 text-white rounded-lg text-xs font-extrabold">
+                        میز {call.table_number}
+                      </span>
+                      <span className="text-xs font-bold text-gray-800">{call.request_type}</span>
+                    </div>
+                    {call.note && <p className="text-xs text-gray-600 mt-1.5">{call.note}</p>}
+                  </div>
+                  <button
+                    onClick={() => handleResolveTableCall(call.id)}
+                    className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-bold hover:bg-green-700 transition-colors shrink-0 cursor-pointer"
+                  >
+                    انجام شد
+                  </button>
+                </div>
+              ))}
+          </div>
         </div>
       )}
 
@@ -792,12 +1015,35 @@ export default function AdminDashboard() {
                       <span className="font-medium text-gray-800">{c.name}</span>
                     </div>
                     <div className="flex items-center gap-2 self-end md:self-auto">
-                      <button onClick={() => setEditingCategory({id: c.id, name: c.name})} className="p-1.5 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors">
+                      <button onClick={() => setEditingCategory({id: c.id, name: c.name})} className="p-1.5 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer">
                         <Edit2 size={16} />
                       </button>
-                      <button onClick={() => handleDeleteCategory(c.id)} className="p-1.5 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors">
-                        <Trash2 size={16} />
-                      </button>
+                      {confirmDeleteCatId === c.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCategory(c.id)}
+                            className="px-2.5 py-1 bg-red-600 text-white rounded-lg text-xs font-bold hover:bg-red-700 cursor-pointer"
+                          >
+                            حذف قطعی
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteCatId(null)}
+                            className="px-2 py-1 bg-gray-200 text-gray-700 rounded-lg text-xs hover:bg-gray-300 cursor-pointer"
+                          >
+                            لغو
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteCatId(c.id)}
+                          className="p-1.5 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
@@ -860,21 +1106,57 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-            <div className="mt-6 border-2 border-dashed border-gray-200 rounded-xl p-6 text-center hover:bg-gray-50 transition cursor-pointer" onClick={() => fileInputRef.current?.click()}>
+            <div className="mt-6 border-2 border-dashed border-gray-200 rounded-xl p-6 text-center hover:bg-gray-50 transition">
               <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} accept="image/*" />
               {preview ? (
-                <div className="relative inline-block">
-                  <img src={preview.startsWith('data:') || preview.startsWith('blob:') || preview.startsWith('http') ? preview : `${import.meta.env.BASE_URL}${preview.replace(/^\//, '')}`} alt="Preview" className="h-32 object-contain rounded-lg" />
-                  <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity rounded-lg">
-                     <ImageIcon className="text-white mb-2" size={24} />
-                     <span className="text-white text-xs">تغییر تصویر</span>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="relative inline-block">
+                    <img
+                      src={
+                        preview.startsWith('data:') || preview.startsWith('blob:') || preview.startsWith('http')
+                          ? preview
+                          : `${import.meta.env.BASE_URL}${preview.replace(/^\//, '')}`
+                      }
+                      alt="Preview"
+                      className="h-36 object-contain rounded-xl border border-gray-200 bg-white p-1"
+                    />
+                  </div>
+                  {webpStats && (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-green-50 text-green-700 border border-green-200 text-xs font-bold">
+                      <CheckCircle size={14} />
+                      <span>
+                        تبدیل خودکار به WebP انجام شد: {webpStats.webpKB} کیلوبایت (حجم اولیه: {webpStats.originalKB} کیلوبایت)
+                      </span>
+                    </span>
+                  )}
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="px-3.5 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-bold text-gray-700 hover:bg-gray-100 cursor-pointer"
+                    >
+                      تغییر تصویر (تبدیل خودکار به WebP)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteProductImage(editingProductId)}
+                      className="px-3.5 py-1.5 bg-red-50 border border-red-200 rounded-lg text-xs font-bold text-red-600 hover:bg-red-100 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 size={14} />
+                      <span>حذف کامل عکس از دیتابیس و سرور</span>
+                    </button>
                   </div>
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center py-4">
+                <div
+                  className="flex flex-col items-center justify-center py-4 cursor-pointer"
+                  onClick={() => fileInputRef.current?.click()}
+                >
                   <ImageIcon className="w-10 h-10 text-gray-400 mb-2" />
-                  <p className="text-sm text-gray-500 font-medium">برای آپلود تصویر کلیک کنید (Drag & Drop)</p>
-                  <p className="text-xs text-gray-400 mt-1">فرمت‌های مجاز: JPG, PNG, WEBP</p>
+                  <p className="text-sm text-gray-700 font-bold">برای انتخاب تصویر محصول کلیک کنید</p>
+                  <p className="text-xs text-green-700 font-medium mt-1">
+                    ✨ تمام تصاویر (JPG, PNG و ...) هنگام آپلود به صورت خودکار فشرده و به فرمت سبک WebP تبدیل می‌شوند
+                  </p>
                 </div>
               )}
             </div>
@@ -973,15 +1255,28 @@ export default function AdminDashboard() {
                     className="hover:bg-gray-50/50 transition-colors"
                   >
                     <td className="px-4 md:px-6 py-3">
-                      <img
-                        src={resolveProductImage(p.image_url, p.name, p.category_id)}
-                        alt={p.name}
-                        referrerPolicy="no-referrer"
-                        onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).src = GENERATED_IMAGES.floralLatte;
-                        }}
-                        className="w-11 h-11 md:w-13 md:h-13 rounded-xl object-cover border border-gray-200"
-                      />
+                      {p.image_url ? (
+                        <div className="relative inline-block group">
+                          <img
+                            src={resolveProductImage(p.image_url, p.name, p.category_id)}
+                            alt={p.name}
+                            referrerPolicy="no-referrer"
+                            className="w-11 h-11 md:w-13 md:h-13 rounded-xl object-cover border border-gray-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteProductImage(p.id)}
+                            title="حذف کامل عکس از دیتابیس و سرور"
+                            className="absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full bg-red-600 text-white flex items-center justify-center opacity-90 hover:opacity-100 shadow-xs cursor-pointer"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="w-11 h-11 md:w-13 md:h-13 rounded-xl bg-gray-100 border border-dashed border-gray-300 flex items-center justify-center text-[10px] text-gray-400">
+                          بدون عکس
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 md:px-6 py-3">
                       <p className="font-semibold text-gray-800">{p.name}</p>
@@ -1024,12 +1319,36 @@ export default function AdminDashboard() {
                             </button>
                           </div>
                         )}
-                        <button onClick={() => handleEditClick(p)} className="p-1.5 md:p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors" title="ویرایش">
+                        <button onClick={() => handleEditClick(p)} className="p-1.5 md:p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer" title="ویرایش">
                           <Edit2 size={16} className="md:w-[18px] md:h-[18px]" />
                         </button>
-                        <button onClick={() => handleDelete(p.id)} className="p-1.5 md:p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="حذف">
-                          <Trash2 size={16} className="md:w-[18px] md:h-[18px]" />
-                        </button>
+                        {confirmDeleteId === p.id ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(p.id)}
+                              className="px-2.5 py-1 bg-red-600 text-white rounded-lg text-xs font-bold hover:bg-red-700 cursor-pointer whitespace-nowrap"
+                            >
+                              حذف قطعی
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              className="px-2 py-1 bg-gray-100 text-gray-600 rounded-lg text-xs hover:bg-gray-200 cursor-pointer"
+                            >
+                              لغو
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(p.id)}
+                            className="p-1.5 md:p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                            title="حذف کامل محصول و عکس"
+                          >
+                            <Trash2 size={16} className="md:w-[18px] md:h-[18px]" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </motion.tr>

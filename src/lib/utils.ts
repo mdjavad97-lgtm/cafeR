@@ -21,6 +21,11 @@ export interface BrandSettings {
   wifi_info: string;
   brand_theme: 'botanical' | 'espresso' | 'terracotta' | 'royal';
   footer_text: string;
+  enable_table_calls?: boolean;
+  notification_provider?: 'telegram' | 'bale' | 'webhook';
+  notification_bot_token?: string;
+  notification_chat_id?: string;
+  notification_webhook_url?: string;
 }
 
 export const DEFAULT_BRAND_SETTINGS: BrandSettings = {
@@ -34,6 +39,11 @@ export const DEFAULT_BRAND_SETTINGS: BrandSettings = {
   wifi_info: 'اینترنت رایگان مهمان',
   brand_theme: 'botanical',
   footer_text: 'پلتفرم منوی دیجیتال هوشمند کافه و رستوران',
+  enable_table_calls: true,
+  notification_provider: 'telegram',
+  notification_bot_token: '',
+  notification_chat_id: '',
+  notification_webhook_url: '',
 };
 
 /**
@@ -58,28 +68,86 @@ export function formatPriceNumber(price: number): string {
 }
 
 /**
- * Resolve product image with smart category-aware fallback to generated studio photography
+ * Resolve product image URL (returns empty string if image was deleted so no orphan/fallback image is shown)
  */
-export function resolveProductImage(imageUrl?: string | null, name = '', categoryId = 1): string {
-  if (imageUrl && imageUrl.trim() !== '') {
-    if (imageUrl.startsWith('http') || imageUrl.startsWith('/src/assets/')) {
-      return imageUrl;
-    }
-    return `${import.meta.env.BASE_URL}${imageUrl.replace(/^\//, '')}`;
+export function resolveProductImage(imageUrl?: string | null, _name = '', _categoryId = 1): string {
+  if (!imageUrl || imageUrl.trim() === '') {
+    return '';
   }
-  const lower = name.toLowerCase();
-  if (lower.includes('چیزکیک') || lower.includes('کیک') || lower.includes('دسر') || categoryId === 3) {
-    return GENERATED_IMAGES.cheesecake;
+  const trimmed = imageUrl.trim();
+  if (trimmed.startsWith('http') || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+    return trimmed;
   }
-  if (lower.includes('آیس') || lower.includes('ماچا') || lower.includes('سرد') || lower.includes('مووهیتو') || categoryId === 2) {
-    return GENERATED_IMAGES.icedMatcha;
-  }
-  if (lower.includes('صبحانه') || lower.includes('بندیکت') || lower.includes('نیمرو') || categoryId === 4) {
-    return GENERATED_IMAGES.benedict;
-  }
-  if (lower.includes('سالاد') || lower.includes('سزار') || lower.includes('پروتئین') || categoryId === 5) {
-    return GENERATED_IMAGES.caesar;
-  }
-  return GENERATED_IMAGES.floralLatte;
+  return `${import.meta.env.BASE_URL}${trimmed.replace(/^\//, '')}`;
 }
+
+/**
+ * Automatically resizes (max 1080px) and converts any selected image (JPG/PNG/etc.) to compressed WebP in the browser before upload
+ */
+export async function convertImageFileToWebP(
+  inputFile: File,
+  maxDimension = 1080,
+  quality = 0.82
+): Promise<{ file: File; originalSize: number; compressedSize: number }> {
+  const originalSize = inputFile.size;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(inputFile);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+
+      let width = img.naturalWidth || img.width;
+      let height = img.naturalHeight || img.height;
+
+      if (width > maxDimension || height > maxDimension) {
+        const ratio = Math.min(maxDimension / width, maxDimension / height);
+        width = Math.max(1, Math.round(width * ratio));
+        height = Math.max(1, Math.round(height * ratio));
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+
+      if (!ctx) {
+        resolve({ file: inputFile, originalSize, compressedSize: originalSize });
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            resolve({ file: inputFile, originalSize, compressedSize: originalSize });
+            return;
+          }
+          const baseName = inputFile.name.replace(/\.[^/.]+$/, '') || 'product-image';
+          const webpFile = new File([blob], `${baseName}.webp`, {
+            type: 'image/webp',
+            lastModified: Date.now(),
+          });
+          resolve({
+            file: webpFile,
+            originalSize,
+            compressedSize: webpFile.size,
+          });
+        },
+        'image/webp',
+        quality
+      );
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve({ file: inputFile, originalSize, compressedSize: originalSize });
+    };
+
+    img.src = objectUrl;
+  });
+}
+
 

@@ -42,6 +42,14 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+  CREATE TABLE IF NOT EXISTS table_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_number TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    note TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 try {
@@ -181,10 +189,9 @@ async function startServer() {
     db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%eggs_benedict%'`).run(IMG.benedict);
     db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%caesar_salad%'`).run(IMG.caesar);
     db.prepare(`UPDATE products SET image_url = ? WHERE image_url LIKE '%cafe_hero_banner%'`).run(IMG.hero);
-    db.prepare(`UPDATE products SET image_url = ? WHERE image_url IS NULL OR image_url = ''`).run(IMG.floralLatte);
 
     const prodCount = (db.prepare('SELECT count(*) as count FROM products').get() as { count: number }).count;
-    if (prodCount < 6) {
+    if (forceReset && prodCount === 0) {
       db.exec('DELETE FROM products;');
       const insertProd = db.prepare(
         'INSERT INTO products (category_id, name, description, price, image_url, is_available, is_special, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -220,7 +227,51 @@ async function startServer() {
     }
   };
 
-  seedRichDemoCatalog(false);
+  // Seed initial demo catalog only if database has never been initialized
+  const isInitialized = db.prepare('SELECT value FROM settings WHERE key = ?').get('catalog_initialized');
+  if (!isInitialized) {
+    seedRichDemoCatalog(true);
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('catalog_initialized', '1');
+  } else {
+    seedRichDemoCatalog(false);
+  }
+
+  /**
+   * Safely deletes a physical image file from /uploads/ if no other DB record references it
+   */
+  const deletePhysicalImageIfUnused = (imageUrl?: string | null): boolean => {
+    if (!imageUrl || !imageUrl.trim()) return false;
+    const normalized = imageUrl.trim();
+    if (!normalized.includes('/uploads/')) return false;
+
+    const filename = path.basename(normalized.split('?')[0]);
+    if (!filename || filename === '.' || filename === '..' || filename === '.htaccess') return false;
+
+    const cleanRelative = `/uploads/${filename}`;
+
+    // Check if any product still references this file
+    const prodRef = db
+      .prepare('SELECT count(*) as count FROM products WHERE image_url = ? OR image_url LIKE ?')
+      .get(cleanRelative, `%${filename}`) as { count: number };
+    if (prodRef.count > 0) return false;
+
+    // Check if brand settings still reference this file
+    const brandRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
+    if (brandRow && brandRow.value && brandRow.value.includes(filename)) {
+      return false;
+    }
+
+    const fullPath = path.join(uploadDir, filename);
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+      try {
+        fs.unlinkSync(fullPath);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
 
   // === API ROUTES ===
   app.get('/api/health', (req, res) => res.json({ status: 'ok', db: 'SQLite configured', imagePipeline: 'WebP auto-compression active' }));
@@ -278,6 +329,11 @@ async function startServer() {
     wifi_info: 'اینترنت رایگان مهمان',
     brand_theme: 'espresso',
     footer_text: 'پلتفرم منوی دیجیتال هوشمند کافه و رستوران',
+    enable_table_calls: true,
+    notification_provider: 'telegram',
+    notification_bot_token: '',
+    notification_chat_id: '',
+    notification_webhook_url: '',
   };
 
   // Public Brand Settings
@@ -305,13 +361,24 @@ async function startServer() {
     return res.status(401).json({ error: 'دسترسی غیرمجاز یا نشست منقضی شده است' });
   };
 
-  // Admin API: Update Brand Settings
+  // Admin API: Update Brand Settings (with automatic physical file cleanup for replaced/removed logo & hero)
   app.put('/api/settings', requireAuth, (req, res) => {
     try {
       const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
       const current = row ? JSON.parse(row.value) : DEFAULT_BRAND;
+      const oldLogo = String(current.logo_url || '');
+      const oldHero = String(current.hero_url || '');
+
       const updated = { ...DEFAULT_BRAND, ...current, ...(req.body || {}) };
       db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('brand_config', JSON.stringify(updated));
+
+      if (oldLogo && oldLogo !== updated.logo_url) {
+        deletePhysicalImageIfUnused(oldLogo);
+      }
+      if (oldHero && oldHero !== updated.hero_url) {
+        deletePhysicalImageIfUnused(oldHero);
+      }
+
       res.json({ success: true, settings: updated });
     } catch {
       res.status(500).json({ error: 'خطا در ذخیره تنظیمات برند' });
@@ -353,6 +420,103 @@ async function startServer() {
     res.json(categories);
   });
 
+  // Customer Table Interaction & Messenger Notification Service (/api/notifications/table-call)
+  app.get('/api/notifications/table-call', requireAuth, (req, res) => {
+    try {
+      const rows = db.prepare('SELECT * FROM table_calls ORDER BY status ASC, id DESC LIMIT 50').all();
+      res.json(rows);
+    } catch {
+      res.json([]);
+    }
+  });
+
+  app.post('/api/notifications/table-call', async (req, res) => {
+    const { table_number, request_type, note } = req.body || {};
+    const tableNum = String(table_number || '').trim();
+    const reqType = String(request_type || 'فراخوان مهماندار').trim();
+    const reqNote = String(note || '').trim();
+
+    if (!tableNum) {
+      return res.status(400).json({ error: 'لطفاً شماره یا نام میز را وارد کنید.' });
+    }
+
+    try {
+      const info = db
+        .prepare("INSERT INTO table_calls (table_number, request_type, note, status, created_at) VALUES (?, ?, ?, 'pending', ?)")
+        .run(tableNum.slice(0, 50), reqType.slice(0, 100), reqNote.slice(0, 500), new Date().toISOString());
+
+      // Optional External Messenger / Webhook Dispatch (Mirrors PHP NotificationService)
+      let dispatched = false;
+      const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
+      const brand = row ? { ...DEFAULT_BRAND, ...JSON.parse(row.value) } : DEFAULT_BRAND;
+      const provider = brand.notification_provider || 'telegram';
+      const botToken = String(brand.notification_bot_token || '').trim();
+      const chatId = String(brand.notification_chat_id || '').trim();
+      const webhookUrl = String(brand.notification_webhook_url || '').trim();
+
+      const msgLines = [
+        `🔔 *درخواست جدید میز — ${brand.cafe_name}*`,
+        `🪑 میز: *${tableNum}*`,
+        `📌 نوع درخواست: *${reqType}*`,
+      ];
+      if (reqNote) msgLines.push(`📝 توضیحات: ${reqNote}`);
+      const text = msgLines.join('\n');
+
+      if ((provider === 'telegram' || provider === 'bale') && botToken && chatId) {
+        const endpoint =
+          provider === 'bale'
+            ? `https://tapi.bale.ai/bot${botToken}/sendMessage`
+            : `https://api.telegram.org/bot${botToken}/sendMessage`;
+        try {
+          const r = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
+          });
+          dispatched = r.ok;
+        } catch {
+          dispatched = false;
+        }
+      } else if (provider === 'webhook' && webhookUrl.startsWith('http')) {
+        try {
+          const r = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'table_call',
+              cafe_name: brand.cafe_name,
+              data: { id: info.lastInsertRowid, table_number: tableNum, request_type: reqType, note: reqNote },
+              text,
+            }),
+          });
+          dispatched = r.ok;
+        } catch {
+          dispatched = false;
+        }
+      }
+
+      res.json({
+        id: info.lastInsertRowid,
+        status: 'pending',
+        dispatched,
+        message: 'درخواست شما برای صندوق و مهماندار ارسال شد.',
+      });
+    } catch {
+      res.status(500).json({ error: 'خطا در ثبت درخواست میز' });
+    }
+  });
+
+  app.put('/api/notifications/table-call/:id', requireAuth, (req, res) => {
+    const status = req.body?.status === 'pending' ? 'pending' : 'completed';
+    db.prepare('UPDATE table_calls SET status = ? WHERE id = ?').run(status, req.params.id);
+    res.json({ success: true });
+  });
+
+  app.delete('/api/notifications/table-call/:id', requireAuth, (req, res) => {
+    db.prepare('DELETE FROM table_calls WHERE id = ?').run(req.params.id);
+    res.json({ success: true });
+  });
+
   // Admin API: Create Category
   app.post('/api/categories', requireAuth, (req, res) => {
     const { name, sort_order } = req.body || {};
@@ -382,10 +546,15 @@ async function startServer() {
     }
   });
 
-  // Admin API: Delete Category
+  // Admin API: Delete Category (Deletes category, its products, and their unused images)
   app.delete('/api/categories/:id', requireAuth, (req, res) => {
     try {
+      const catProds = db.prepare('SELECT image_url FROM products WHERE category_id = ?').all(req.params.id) as { image_url: string }[];
+      db.prepare('DELETE FROM products WHERE category_id = ?').run(req.params.id);
       db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+      for (const p of catProds) {
+        if (p.image_url) deletePhysicalImageIfUnused(p.image_url);
+      }
       res.json({ success: true });
     } catch {
       res.status(500).json({ error: 'Database error' });
@@ -424,11 +593,30 @@ async function startServer() {
     res.json({ id: info.lastInsertRowid });
   });
 
-  // Admin API: Edit Product
+  // Admin API: Delete ONLY Product Image (Clears DB image_url AND deletes physical file from /uploads/)
+  app.delete('/api/products/:id/image', requireAuth, (req, res) => {
+    try {
+      const current = db.prepare('SELECT image_url FROM products WHERE id = ?').get(req.params.id) as { image_url: string } | undefined;
+      const oldImageUrl = current?.image_url || '';
+
+      db.prepare("UPDATE products SET image_url = '' WHERE id = ?").run(req.params.id);
+
+      const fileDeleted = oldImageUrl ? deletePhysicalImageIfUnused(oldImageUrl) : false;
+      res.json({ success: true, file_deleted: fileDeleted });
+    } catch {
+      res.status(500).json({ error: 'خطا در حذف تصویر محصول' });
+    }
+  });
+
+  // Admin API: Edit Product (Automatically cleans up old image file if replaced or cleared)
   app.put('/api/products/:id', requireAuth, (req, res) => {
     const { category_id, name, description, price, image_url, is_available, is_special, sort_order } = req.body || {};
-    const current = db.prepare('SELECT sort_order FROM products WHERE id = ?').get(req.params.id) as { sort_order: number } | undefined;
+    const current = db.prepare('SELECT sort_order, image_url FROM products WHERE id = ?').get(req.params.id) as
+      | { sort_order: number; image_url: string }
+      | undefined;
     const order = sort_order !== undefined ? Number(sort_order) : current ? current.sort_order : 0;
+    const oldImageUrl = current?.image_url || '';
+    const newImageUrl = String(image_url || '').trim();
 
     db.prepare(
       'UPDATE products SET category_id = ?, name = ?, description = ?, price = ?, image_url = ?, is_available = ?, is_special = ?, sort_order = ? WHERE id = ?'
@@ -437,19 +625,29 @@ async function startServer() {
       String(name || '').trim(),
       String(description || '').trim(),
       Number(price) || 0,
-      String(image_url || '').trim(),
+      newImageUrl,
       is_available ? 1 : 0,
       is_special ? 1 : 0,
       order,
       req.params.id
     );
+
+    if (oldImageUrl && oldImageUrl !== newImageUrl) {
+      deletePhysicalImageIfUnused(oldImageUrl);
+    }
+
     res.json({ success: true });
   });
 
-  // Admin API: Delete Product
+  // Admin API: Delete Product (Deletes DB record AND deletes physical image file from /uploads/)
   app.delete('/api/products/:id', requireAuth, (req, res) => {
+    const current = db.prepare('SELECT image_url FROM products WHERE id = ?').get(req.params.id) as { image_url: string } | undefined;
+    const oldImageUrl = current?.image_url || '';
+
     db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
-    res.json({ success: true });
+
+    const fileDeleted = oldImageUrl ? deletePhysicalImageIfUnused(oldImageUrl) : false;
+    res.json({ success: true, file_deleted: fileDeleted });
   });
 
   // Secure Image Upload API with automatic Resize & WebP Compression
@@ -472,12 +670,20 @@ async function startServer() {
         finalPath,
       ]);
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      res.json({ url: `/uploads/${finalFilename}` });
+      const stat = fs.statSync(finalPath);
+      res.json({ url: `/uploads/${finalFilename}`, format: 'webp', size: stat.size });
     } catch {
       // If ImageMagick fails (e.g. corrupted or fake image shell), delete immediately and reject
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
       return res.status(400).json({ error: 'فایل تصویر معتبر نیست یا آسیب دیده است' });
     }
+  });
+
+  // Direct Upload File Deletion API (For unsaved previews or explicit cleanup)
+  app.delete('/api/upload', requireAuth, (req, res) => {
+    const targetUrl = String(req.body?.url || '').trim();
+    const deleted = deletePhysicalImageIfUnused(targetUrl);
+    res.json({ success: true, file_deleted: deleted });
   });
 
   // Vite Application Rendering

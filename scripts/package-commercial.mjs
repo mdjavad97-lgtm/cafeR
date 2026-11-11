@@ -21,13 +21,19 @@ for (const entry of fs.readdirSync(distDir)) {
   fs.cpSync(path.join(distDir, entry), path.join(releaseDir, entry), { recursive: true });
 }
 
-// Copy modular PHP backend, .htaccess, uploads (WebP + security .htaccess), database.sql, and readme.md
+// Copy single unified /uploads directory (WebP images + security .htaccess) from project root
+const rootUploadsDir = path.join(rootDir, 'uploads');
+if (fs.existsSync(rootUploadsDir)) {
+  fs.cpSync(rootUploadsDir, path.join(releaseDir, 'uploads'), { recursive: true });
+}
+
+// Copy modular PHP backend, .htaccess, database.sql, and readme.md from backend-php/
 const phpDir = path.join(rootDir, 'backend-php');
-for (const entry of ['api', 'uploads', '.htaccess', 'database.sql', 'readme.md']) {
+for (const entry of ['api', '.htaccess', 'database.sql', 'readme.md']) {
   const srcPath = path.join(phpDir, entry);
   if (fs.existsSync(srcPath)) {
     fs.cpSync(srcPath, path.join(releaseDir, entry), { recursive: true });
   }
 }
 
-console.log('✅ بسته تجاری آماده تحویل به مشتری در پوشه release-cpanel ساخته شد.');
+console.log('✅ بسته تجاری یکپارچه بدون تکرار پوشه uploads در پوشه release-cpanel ساخته شد.');

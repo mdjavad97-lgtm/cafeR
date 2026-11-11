@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS settings (
     value LONGTEXT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS table_calls (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    table_number VARCHAR(50) NOT NULL,
+    request_type VARCHAR(100) NOT NULL,
+    note VARCHAR(500) DEFAULT '',
+    status VARCHAR(30) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 -- نام کاربری پیش‌فرض: admin | رمز عبور پیش‌فرض: admin123
 INSERT IGNORE INTO admins (id, username, password_hash) VALUES
 (1, 'admin', '$2y$10$X7.mQ6a/C1iNlV8x/fS//OJn6l/wOhR6Q1yI1Fk.f39r0Bq0Rj7Tq');

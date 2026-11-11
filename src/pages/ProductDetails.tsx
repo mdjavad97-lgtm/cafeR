@@ -55,25 +55,26 @@ export default function ProductDetails() {
         <ArrowRight size={20} />
       </button>
 
-      <div
-        className="w-full h-[45vh] md:h-[58vh] bg-bg-subtle flex items-center justify-center relative overflow-hidden border-b border-border-subtle cursor-pointer group"
-        onClick={() => setLightboxOpen(true)}
-      >
-        <img
-          src={resolvedImg}
-          alt={product.name}
-          referrerPolicy="no-referrer"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).src = GENERATED_IMAGES.floralLatte;
-          }}
-          className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-700"
-        />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/20" />
-        <div className="absolute bottom-6 left-6 bg-black/55 backdrop-blur-md text-white text-xs px-3.5 py-2 rounded-xl flex items-center gap-1.5 border border-white/15">
-          <ZoomIn size={14} />
-          <span>بزرگنمایی تصویر</span>
+      {resolvedImg ? (
+        <div
+          className="w-full h-[45vh] md:h-[58vh] bg-bg-subtle flex items-center justify-center relative overflow-hidden border-b border-border-subtle cursor-pointer group"
+          onClick={() => setLightboxOpen(true)}
+        >
+          <img
+            src={resolvedImg}
+            alt={product.name}
+            referrerPolicy="no-referrer"
+            className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-700"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/20" />
+          <div className="absolute bottom-6 left-6 bg-black/55 backdrop-blur-md text-white text-xs px-3.5 py-2 rounded-xl flex items-center gap-1.5 border border-white/15">
+            <ZoomIn size={14} />
+            <span>بزرگنمایی تصویر</span>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="w-full h-32 bg-bg-subtle border-b border-border-subtle" />
+      )}
 
       <motion.div
         initial={{ y: 24, opacity: 0 }}
