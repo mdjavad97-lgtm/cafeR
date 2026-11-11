@@ -6,3 +6,15 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime data (never commit customer data)
+database/
+*.db
+*.db-wal
+*.db-shm
+
+# Local secrets & build output
+.jwt-secret
+.jwt-secret.php
+.login-attempts.json
+release-cpanel/

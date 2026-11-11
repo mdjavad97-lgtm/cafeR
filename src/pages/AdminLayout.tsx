@@ -24,6 +24,20 @@ export default function AdminLayout() {
     return () => window.removeEventListener('brand-settings-updated', loadBrand);
   }, []);
 
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${import.meta.env.BASE_URL}api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => {
+        if (r.status === 401) {
+          localStorage.removeItem('admin_token');
+          navigate('/log', { replace: true });
+        }
+      })
+      .catch(() => {});
+  }, [token, navigate]);
+
   if (!token) return <Navigate to="/log" replace />;
 
   const handleLogout = () => {

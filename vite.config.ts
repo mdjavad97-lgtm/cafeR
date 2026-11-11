@@ -5,12 +5,11 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  // Deployment path is configurable: "/" for a root install, "/Menu/" for a subfolder.
+  const base = env.VITE_BASE || (mode === 'production' ? '/Menu/' : '/');
   return {
-    base: mode === 'production' ? '/Menu/' : '/',
+    base,
     plugins: [react(), tailwindcss()],
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
@@ -37,8 +36,7 @@ export default defineConfig(({mode}) => {
       }
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // HMR can be disabled with DISABLE_HMR=true (useful on low-resource hosts).
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},

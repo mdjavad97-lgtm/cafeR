@@ -1,3 +1,17 @@
+# No directory listing
+Options -Indexes
+
+# Never serve dotfiles, SQL dumps, docs, logs or local secrets
+<FilesMatch "(^\.|\.(sql|md|env|log|db|sqlite|sqlite3|bak)$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
     

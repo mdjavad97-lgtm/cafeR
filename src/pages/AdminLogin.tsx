@@ -5,8 +5,8 @@ import { Coffee } from 'lucide-react';
 import { DEFAULT_BRAND_SETTINGS } from '../lib/utils';
 
 export default function AdminLogin() {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [cafeName, setCafeName] = useState(DEFAULT_BRAND_SETTINGS.cafe_name);
   const navigate = useNavigate();
 
@@ -55,6 +55,9 @@ export default function AdminLogin() {
             <label className="block text-sm font-medium text-gray-700 mb-1">نام کاربری</label>
             <input 
               type="text" 
+              autoComplete="username"
+              placeholder="admin"
+              required
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/50 text-left"
               dir="ltr"
               value={username}
@@ -65,6 +68,9 @@ export default function AdminLogin() {
             <label className="block text-sm font-medium text-gray-700 mb-1">رمز عبور</label>
             <input 
               type="password" 
+              autoComplete="current-password"
+              placeholder="••••••••"
+              required
               className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-primary/50 text-left"
               dir="ltr"
               value={password}

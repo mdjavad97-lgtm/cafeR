@@ -50,6 +50,55 @@ function getMergedBrandSettings(PDO $pdo, array $defaultBrand): array
     return array_merge($defaultBrand, $parsed);
 }
 
+/**
+ * PDO/MySQL may return numeric columns as strings depending on driver mode.
+ * The frontend compares strictly (is_available === 0), so cast explicitly.
+ */
+function castNumericFields(array $row, array $intFields): array
+{
+    foreach ($intFields as $field) {
+        if (array_key_exists($field, $row) && $row[$field] !== null) {
+            $row[$field] = (int) $row[$field];
+        }
+    }
+    return $row;
+}
+
+function normalizeProductRow(array $row): array
+{
+    return castNumericFields($row, ['id', 'category_id', 'price', 'is_available', 'is_special', 'sort_order']);
+}
+
+function normalizeProductRows(array $rows): array
+{
+    return array_map('normalizeProductRow', $rows);
+}
+
+function normalizeCategoryRows(array $rows): array
+{
+    return array_map(static fn (array $row): array => castNumericFields($row, ['id', 'sort_order']), $rows);
+}
+
+function normalizeTableCallRows(array $rows): array
+{
+    return array_map(static fn (array $row): array => castNumericFields($row, ['id']), $rows);
+}
+
+/**
+ * Removes private notification credentials from the public brand payload.
+ */
+function toPublicSettings(array $settings): array
+{
+    $hasCredentials = !empty($settings['notification_bot_token']) && !empty($settings['notification_chat_id']);
+    unset(
+        $settings['notification_bot_token'],
+        $settings['notification_chat_id'],
+        $settings['notification_webhook_url']
+    );
+    $settings['has_notification_credentials'] = $hasCredentials;
+    return $settings;
+}
+
 // 1. Health Check
 if ($baseResource === 'health' && $method === 'GET') {
     echo json_encode([
@@ -70,11 +119,21 @@ if ($baseResource === 'auth') {
         $username = trim((string) ($data['username'] ?? ''));
         $password = (string) ($data['password'] ?? '');
 
+        if ($username === '' || $password === '') {
+            http_response_code(400);
+            echo json_encode(['error' => 'نام کاربری و رمز عبور الزامی است']);
+            exit;
+        }
+
+        $throttleKey = SecurityMiddleware::loginThrottleKey($username);
+        SecurityMiddleware::checkLoginThrottle($throttleKey);
+
         $stmt = $pdo->prepare('SELECT id, username, password_hash FROM admins WHERE username = ? LIMIT 1');
         $stmt->execute([$username]);
         $admin = $stmt->fetch();
 
         if ($admin && password_verify($password, $admin['password_hash'])) {
+            SecurityMiddleware::clearLoginFailures($throttleKey);
             $token = SecurityMiddleware::signJwt([
                 'sub'      => $admin['id'],
                 'username' => $admin['username'],
@@ -82,9 +141,16 @@ if ($baseResource === 'auth') {
             ]);
             echo json_encode(['token' => $token]);
         } else {
+            SecurityMiddleware::recordFailedLogin($throttleKey);
             http_response_code(401);
             echo json_encode(['error' => 'نام کاربری یا رمز عبور اشتباه است']);
         }
+        exit;
+    }
+
+    if ($subRoute === 'me' && $method === 'GET') {
+        SecurityMiddleware::requireAuth();
+        echo json_encode(['ok' => true]);
         exit;
     }
 
@@ -107,15 +173,24 @@ if ($baseResource === 'auth') {
     }
 }
 
+// 2b. Admin-only settings (full config, including notification credentials)
+if ($baseResource === 'admin') {
+    SecurityMiddleware::requireAuth();
+    $subRoute = $pathParts[1] ?? '';
+    if ($subRoute === 'settings' && $method === 'GET') {
+        echo json_encode(getMergedBrandSettings($pdo, $defaultBrand));
+        exit;
+    }
+    http_response_code(404);
+    echo json_encode(['error' => 'Route not found']);
+    exit;
+}
+
 // 3. Brand Settings API (With automatic cleanup of replaced/deleted logo & hero images)
 if ($baseResource === 'settings') {
     if ($method === 'GET') {
         $settings = getMergedBrandSettings($pdo, $defaultBrand);
-        $publicSettings = $settings;
-        if (!empty($publicSettings['notification_bot_token'])) {
-            $publicSettings['has_bot_token'] = true;
-        }
-        echo json_encode($publicSettings);
+        echo json_encode(toPublicSettings($settings));
         exit;
     }
 
@@ -182,7 +257,7 @@ if ($baseResource === 'notifications') {
     if ($subRoute === 'table-call') {
         if ($method === 'GET') {
             SecurityMiddleware::requireAuth();
-            echo json_encode(NotificationService::listTableCalls($pdo));
+            echo json_encode(normalizeTableCallRows(NotificationService::listTableCalls($pdo)));
             exit;
         }
 
@@ -220,7 +295,7 @@ if ($baseResource === 'notifications') {
 if ($baseResource === 'categories') {
     if ($method === 'GET') {
         $stmt = $pdo->query('SELECT * FROM categories ORDER BY sort_order ASC, id ASC');
-        echo json_encode($stmt->fetchAll());
+        echo json_encode(normalizeCategoryRows($stmt->fetchAll()));
         exit;
     }
 
@@ -271,14 +346,14 @@ if ($baseResource === 'products') {
             $stmt->execute([(int) $resourceId]);
             $product = $stmt->fetch();
             if ($product) {
-                echo json_encode($product);
+                echo json_encode(normalizeProductRow($product));
             } else {
                 http_response_code(404);
                 echo json_encode(['error' => 'Not found']);
             }
         } else {
             $stmt = $pdo->query('SELECT * FROM products ORDER BY sort_order ASC, id DESC');
-            echo json_encode($stmt->fetchAll());
+            echo json_encode(normalizeProductRows($stmt->fetchAll()));
         }
         exit;
     }

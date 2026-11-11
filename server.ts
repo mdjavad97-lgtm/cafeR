@@ -1,7 +1,9 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import cors from 'cors';
 import multer from 'multer';
+import bcrypt from 'bcryptjs';
 import Database from 'better-sqlite3';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
@@ -58,7 +60,34 @@ try {
   // Column already exists
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'cafe-menu-enterprise-secret-key-2026';
+/**
+ * JWT secret resolution:
+ * - production: JWT_SECRET is mandatory (>= 32 chars), otherwise the server refuses to boot.
+ * - development: falls back to a generated `.jwt-secret` file so tokens survive restarts.
+ */
+function loadJwtSecret(): string {
+  const fromEnv = (process.env.JWT_SECRET || '').trim();
+  if (fromEnv.length >= 32) return fromEnv;
+  if (fromEnv.length > 0) {
+    throw new Error('JWT_SECRET must be at least 32 characters long');
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is required in production. Set it in the environment.');
+  }
+
+  const secretFile = path.join(process.cwd(), '.jwt-secret');
+  if (fs.existsSync(secretFile)) {
+    const saved = fs.readFileSync(secretFile, 'utf8').trim();
+    if (saved.length >= 32) return saved;
+  }
+
+  const generated = crypto.randomBytes(48).toString('hex');
+  fs.writeFileSync(secretFile, generated, { mode: 0o600 });
+  console.warn('[security] JWT_SECRET is not set — generated a local .jwt-secret file for development.');
+  return generated;
+}
+
+const JWT_SECRET = loadJwtSecret();
 
 function signJwtToken(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
@@ -70,18 +99,36 @@ function signJwtToken(payload: Record<string, unknown>): string {
 }
 
 function verifyJwtToken(token: string): boolean {
-  if (token === 'admin-mock-token') return true; // Keep demo one-click access working
   const parts = token.split('.');
   if (parts.length !== 3) return false;
   const [header, body, sig] = parts;
+
   const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
-  if (sig !== expectedSig) return false;
+  const provided = Buffer.from(sig);
+  const expected = Buffer.from(expectedSig);
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+    return false;
+  }
+
   try {
+    const parsedHeader = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'));
+    if (parsedHeader?.alg !== 'HS256') return false;
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     return !payload.exp || payload.exp > Math.floor(Date.now() / 1000);
   } catch {
     return false;
   }
+}
+
+/**
+ * Detects the real image type from magic bytes, so a renamed/mislabeled file is rejected.
+ */
+function sniffImageKind(header: Buffer): 'webp' | 'png' | 'jpg' | 'gif' | null {
+  if (header.length >= 12 && header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 12) === 'WEBP') return 'webp';
+  if (header.length >= 4 && header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47) return 'png';
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return 'jpg';
+  if (header.length >= 3 && header.toString('ascii', 0, 3) === 'GIF') return 'gif';
+  return null;
 }
 
 function hashPassword(password: string): string {
@@ -93,26 +140,58 @@ function hashPassword(password: string): string {
 function verifyPassword(password: string, storedHash: string): boolean {
   if (storedHash.startsWith('scrypt:')) {
     const [, salt, key] = storedHash.split(':');
-    const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-    return crypto.timingSafeEqual(Buffer.from(key, 'hex'), Buffer.from(derived, 'hex'));
+    if (!salt || !key) return false;
+    const derived = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(key, 'hex');
+    return expected.length === derived.length && crypto.timingSafeEqual(expected, derived);
   }
-  // Default seeded admin123 bcrypt compatibility
-  return password === 'admin123';
+  // Legacy bcrypt hashes (for admins imported from an older/MySQL installation)
+  if (/^\$2[aby]\$/.test(storedHash)) {
+    try {
+      return bcrypt.compareSync(password, storedHash);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(cors());
+  // Behind nginx/cPanel reverse proxy: needed for correct client IPs in rate limiting
+  app.set('trust proxy', 1);
+
+  // CORS is only enabled when an explicit allowlist is configured.
+  // The app is served same-origin, so it needs no CORS by default.
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  if (allowedOrigins.length > 0) {
+    app.use(cors({ origin: allowedOrigins }));
+  }
+
   app.use(express.json({ limit: '2mb' }));
 
   // Security headers
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (req.path.startsWith('/api/')) {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     next();
   });
+
+  // Simple in-memory brute-force protection for the admin login
+  const loginFailures = new Map<string, { count: number; blockedUntil: number }>();
+  const MAX_LOGIN_ATTEMPTS = 8;
+  const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+  const getLoginKey = (req: express.Request, username: string) =>
+    `${req.ip || 'unknown'}|${username.toLowerCase()}`;
 
   // Make uploads directory reachable statically with long-term cache headers for WebP images
   const uploadDir = path.join(process.cwd(), 'uploads');
@@ -169,7 +248,7 @@ async function startServer() {
     }
 
     if (forceReset) {
-      db.exec('DELETE FROM products; DELETE FROM categories; DELETE FROM sqlite_sequence WHERE name IN ("products", "categories");');
+      db.exec("DELETE FROM products; DELETE FROM categories; DELETE FROM sqlite_sequence WHERE name IN ('products', 'categories');");
     }
 
     const catCount = (db.prepare('SELECT count(*) as count FROM categories').get() as { count: number }).count;
@@ -199,26 +278,26 @@ async function startServer() {
 
       const demoItems = [
         // 1. بار گرم
-        [getCatId(0), 'لاته آرت زعفران و گل سرخ', 'اسپرسو تخصصی ۱۰۰٪ عربیکا، شیر مخملی فوم‌گیری شده، عصاره طبیعی گل محمدی و زعفران قائنات', 145000, IMG.floralLatte, 1, 1, 1],
-        [getCatId(0), 'کاپوچینو دست‌ساز ایتالیایی', 'دبل شات اسپرسو رست مدیوم با فوم شیر غلیظ و کرمی در فنجان سرامیکی دست‌ساز', 120000, IMG.floralLatte, 1, 0, 2],
-        [getCatId(0), 'کورتادو فندوق و کارامل', 'ترکیب متعادل اسپرسو دوبل و شیر گرم بخارپز شده همراه با نت‌های طبیعی فندق برشته', 115000, IMG.floralLatte, 1, 0, 3],
+        [getCatId(0), 'لاته آرت زعفران و گل سرخ', 'اسپرسو تخصصی ۱۰۰٪ عربیکا، شیر مخملی فوم‌گیری شده، عصاره طبیعی گل محمدی و زعفران قائنات', 145, IMG.floralLatte, 1, 1, 1],
+        [getCatId(0), 'کاپوچینو دست‌ساز ایتالیایی', 'دبل شات اسپرسو رست مدیوم با فوم شیر غلیظ و کرمی در فنجان سرامیکی دست‌ساز', 120, IMG.floralLatte, 1, 0, 2],
+        [getCatId(0), 'کورتادو فندوق و کارامل', 'ترکیب متعادل اسپرسو دوبل و شیر گرم بخارپز شده همراه با نت‌های طبیعی فندق برشته', 115, IMG.floralLatte, 1, 0, 3],
 
         // 2. بار سرد
-        [getCatId(1), 'آیس ماچا بری لایه‌ای', 'ماچای تشریفاتی ژاپنی، پوره توت‌فرنگی تازه، شیر بادام سرد و کلد فوم وانیلی', 168000, IMG.icedMatcha, 1, 1, 4],
-        [getCatId(1), 'کلد برو پرتقال و رزماری', 'قهوه دم‌سرد ۱۸ ساعته همراه با آب پرتقال طبیعی، سیروپ خانگی و شاخه رزماری تازه', 140000, IMG.icedMatcha, 1, 0, 5],
-        [getCatId(1), 'مووهیتو توت‌فرنگی و نعناع تازه', 'توت‌فرنگی تازه له‌شده، برگ نعناع ارگانیک، لیموترش تازه و سودای گازدار خنک', 135000, IMG.icedMatcha, 1, 0, 6],
+        [getCatId(1), 'آیس ماچا بری لایه‌ای', 'ماچای تشریفاتی ژاپنی، پوره توت‌فرنگی تازه، شیر بادام سرد و کلد فوم وانیلی', 168, IMG.icedMatcha, 1, 1, 4],
+        [getCatId(1), 'کلد برو پرتقال و رزماری', 'قهوه دم‌سرد ۱۸ ساعته همراه با آب پرتقال طبیعی، سیروپ خانگی و شاخه رزماری تازه', 140, IMG.icedMatcha, 1, 0, 5],
+        [getCatId(1), 'مووهیتو توت‌فرنگی و نعناع تازه', 'توت‌فرنگی تازه له‌شده، برگ نعناع ارگانیک، لیموترش تازه و سودای گازدار خنک', 135, IMG.icedMatcha, 1, 0, 6],
 
         // 3. کیک و دسر
-        [getCatId(2), 'چیزکیک سن‌سباستین با سس توت‌فرنگی', 'چیزکیک تنوری بافت کرمی به سبک باسک اسپانیا با کامپوت توت‌فرنگی تازه و مغز پسته ایرانی', 185000, IMG.cheesecake, 1, 1, 7],
-        [getCatId(2), 'کروسان کره‌ای فرانسوی و کره محلی', 'خمیر هزارلا با کره خالص فرانسوی، پخت روزانه، ترد و طلایی همراه با مارمالاد دست‌ساز', 118000, IMG.hero, 1, 0, 8],
+        [getCatId(2), 'چیزکیک سن‌سباستین با سس توت‌فرنگی', 'چیزکیک تنوری بافت کرمی به سبک باسک اسپانیا با کامپوت توت‌فرنگی تازه و مغز پسته ایرانی', 185, IMG.cheesecake, 1, 1, 7],
+        [getCatId(2), 'کروسان کره‌ای فرانسوی و کره محلی', 'خمیر هزارلا با کره خالص فرانسوی، پخت روزانه، ترد و طلایی همراه با مارمالاد دست‌ساز', 118, IMG.hero, 1, 0, 8],
 
         // 4. صبحانه
-        [getCatId(3), 'اگز بندیکت روی نان خمیرترش', 'دو عدد تخم‌مرغ پوچد عسلی، آووکادو تازه، سس هلندیز دست‌ساز و میکروگرین روی نان بریوش خمیرترش', 265000, IMG.benedict, 1, 1, 9],
-        [getCatId(3), 'سینی برانچ مدیترانه‌ای و کروسان', 'کروسان تازه، تخم‌مرغ نیمرو، پنیر فتا، زیتون مزه، گردو و یک فنجان لاته تخصصی', 310000, IMG.hero, 1, 0, 10],
+        [getCatId(3), 'اگز بندیکت روی نان خمیرترش', 'دو عدد تخم‌مرغ پوچد عسلی، آووکادو تازه، سس هلندیز دست‌ساز و میکروگرین روی نان بریوش خمیرترش', 265, IMG.benedict, 1, 1, 9],
+        [getCatId(3), 'سینی برانچ مدیترانه‌ای و کروسان', 'کروسان تازه، تخم‌مرغ نیمرو، پنیر فتا، زیتون مزه، گردو و یک فنجان لاته تخصصی', 310, IMG.hero, 1, 0, 10],
 
         // 5. سالاد و پیش‌غذا
-        [getCatId(4), 'سالاد سزار با فیله مرغ گریل و رزماری', 'کاهو رسمی تازه، فیله مرغ مرینیت شده با سبزیجات معطر، پنیر پارمزان ورقه‌ای، کروتان سیر و سس سزار دست‌ساز', 285000, IMG.caesar, 1, 1, 11],
-        [getCatId(4), 'بول پروتئینی مرغ گریل و آووکادو', 'سینه مرغ گریل، کاهو کرانچی، نان خمیرترش برشته، پارمزان کهنه و درسینگ روغن زیتون فرابکر', 295000, IMG.caesar, 1, 0, 12],
+        [getCatId(4), 'سالاد سزار با فیله مرغ گریل و رزماری', 'کاهو رسمی تازه، فیله مرغ مرینیت شده با سبزیجات معطر، پنیر پارمزان ورقه‌ای، کروتان سیر و سس سزار دست‌ساز', 285, IMG.caesar, 1, 1, 11],
+        [getCatId(4), 'بول پروتئینی مرغ گریل و آووکادو', 'سینه مرغ گریل، کاهو کرانچی، نان خمیرترش برشته، پارمزان کهنه و درسینگ روغن زیتون فرابکر', 295, IMG.caesar, 1, 0, 12],
       ];
 
       for (const item of demoItems) {
@@ -273,10 +352,20 @@ async function startServer() {
     return false;
   };
 
+  // Authentication Middleware (HMAC-SHA256 JWT)
+  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (verifyJwtToken(token)) return next();
+    }
+    return res.status(401).json({ error: 'دسترسی غیرمجاز یا نشست منقضی شده است' });
+  };
+
   // === API ROUTES ===
   app.get('/api/health', (req, res) => res.json({ status: 'ok', db: 'SQLite configured', imagePipeline: 'WebP auto-compression active' }));
 
-  app.post('/api/demo/seed', (req, res) => {
+  app.post('/api/demo/seed', requireAuth, (req, res) => {
     try {
       seedRichDemoCatalog(true);
       res.json({ success: true, message: 'منوی نمونه کافه رستوران با تصاویر WebP بازنشانی شد' });
@@ -309,7 +398,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/leads', (req, res) => {
+  app.get('/api/leads', requireAuth, (req, res) => {
     try {
       const existingRaw = db.prepare('SELECT value FROM settings WHERE key = ?').get('b2b_leads') as { value: string } | undefined;
       res.json(existingRaw ? JSON.parse(existingRaw.value) : []);
@@ -336,30 +425,32 @@ async function startServer() {
     notification_webhook_url: '',
   };
 
-  // Public Brand Settings
+  // Notification credentials must never reach the public menu bundle
+  const PRIVATE_BRAND_KEYS = ['notification_bot_token', 'notification_chat_id', 'notification_webhook_url'];
+
+  const toPublicBrand = (brand: Record<string, unknown>) => {
+    const publicBrand: Record<string, unknown> = { ...brand };
+    for (const key of PRIVATE_BRAND_KEYS) delete publicBrand[key];
+    publicBrand.has_notification_credentials = Boolean(
+      brand.notification_bot_token && brand.notification_chat_id
+    );
+    return publicBrand;
+  };
+
+  // Public Brand Settings (secrets stripped)
   app.get('/api/settings', (req, res) => {
     try {
       const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
-      if (!row) return res.json(DEFAULT_BRAND);
+      if (!row) return res.json(toPublicBrand(DEFAULT_BRAND));
       const parsed = JSON.parse(row.value);
       if (parsed.hero_url && parsed.hero_url.includes('/src/assets/')) {
         parsed.hero_url = IMG.hero;
       }
-      res.json({ ...DEFAULT_BRAND, ...parsed });
+      res.json(toPublicBrand({ ...DEFAULT_BRAND, ...parsed }));
     } catch {
-      res.json(DEFAULT_BRAND);
+      res.json(toPublicBrand(DEFAULT_BRAND));
     }
   });
-
-  // Authentication Middleware (Supports HMAC-SHA256 JWT + demo token)
-  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7).trim();
-      if (verifyJwtToken(token)) return next();
-    }
-    return res.status(401).json({ error: 'دسترسی غیرمجاز یا نشست منقضی شده است' });
-  };
 
   // Admin API: Update Brand Settings (with automatic physical file cleanup for replaced/removed logo & hero)
   app.put('/api/settings', requireAuth, (req, res) => {
@@ -385,22 +476,53 @@ async function startServer() {
     }
   });
 
+  // Admin Brand Settings: full config for the dashboard form (never exposed publicly)
+  app.get('/api/admin/settings', requireAuth, (req, res) => {
+    try {
+      const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('brand_config') as { value: string } | undefined;
+      res.json({ ...DEFAULT_BRAND, ...(row ? JSON.parse(row.value) : {}) });
+    } catch {
+      res.json(DEFAULT_BRAND);
+    }
+  });
+
   // Admin Auth Login (Issues real signed JWT)
   app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body || {};
     if (!username || !password) {
       return res.status(400).json({ error: 'نام کاربری و رمز عبور الزامی است' });
     }
+
+    const key = getLoginKey(req, String(username));
+    const now = Date.now();
+    const attempt = loginFailures.get(key);
+    if (attempt && attempt.blockedUntil > now) {
+      const minutes = Math.ceil((attempt.blockedUntil - now) / 60000);
+      return res.status(429).json({ error: `تلاش‌های ناموفق زیاد است. لطفاً ${minutes} دقیقه دیگر تلاش کنید.` });
+    }
+
     const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(String(username)) as
       | { id: number; username: string; password_hash: string }
       | undefined;
 
     if (admin && verifyPassword(String(password), admin.password_hash)) {
+      loginFailures.delete(key);
       const token = signJwtToken({ sub: admin.id, username: admin.username, role: 'admin' });
-      res.json({ token });
-    } else {
-      res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است' });
+      return res.json({ token });
     }
+
+    const nextCount = (attempt?.count || 0) + 1;
+    loginFailures.set(key, {
+      count: nextCount,
+      blockedUntil: nextCount >= MAX_LOGIN_ATTEMPTS ? now + LOGIN_WINDOW_MS : 0,
+    });
+
+    return res.status(401).json({ error: 'نام کاربری یا رمز عبور اشتباه است' });
+  });
+
+  // Lightweight session probe used by the admin layout
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json({ ok: true });
   });
 
   // Admin Password Change Endpoint (Replaces insecure standalone hash.php)
@@ -659,23 +781,40 @@ async function startServer() {
     const finalPath = path.join(uploadDir, finalFilename);
 
     try {
-      // Re-encode, strip metadata/payloads, resize to max 1080px, and compress to WebP (82% quality)
-      execFileSync('convert', [
-        tmpPath,
-        '-strip',
-        '-resize',
-        '1080x1080>',
-        '-quality',
-        '82',
-        finalPath,
-      ]);
-      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      // Validate the real file type from its magic bytes (never trust the extension/mimetype)
+      const fd = fs.openSync(tmpPath, 'r');
+      const header = Buffer.alloc(12);
+      let bytesRead = 0;
+      try {
+        bytesRead = fs.readSync(fd, header, 0, 12, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const kind = sniffImageKind(header.subarray(0, bytesRead));
+      if (!kind) {
+        fs.unlinkSync(tmpPath);
+        return res.status(400).json({ error: 'فایل تصویر معتبر نیست' });
+      }
+
+      // The browser already converts to compressed WebP, so use it as-is.
+      // Other formats fall back to ImageMagick when it is available on the host.
+      if (kind === 'webp') {
+        fs.renameSync(tmpPath, finalPath);
+      } else {
+        execFileSync('convert', [tmpPath, '-strip', '-resize', '1080x1080>', '-quality', '82', finalPath]);
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      }
+
       const stat = fs.statSync(finalPath);
       res.json({ url: `/uploads/${finalFilename}`, format: 'webp', size: stat.size });
     } catch {
-      // If ImageMagick fails (e.g. corrupted or fake image shell), delete immediately and reject
+      // Corrupted file, or ImageMagick missing on the host
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      return res.status(400).json({ error: 'فایل تصویر معتبر نیست یا آسیب دیده است' });
+      if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+      return res.status(400).json({
+        error: 'پردازش تصویر ناموفق بود. لطفاً تصویر را دوباره انتخاب کنید (فرمت JPG، PNG یا WebP).',
+      });
     }
   });
 
@@ -684,6 +823,23 @@ async function startServer() {
     const targetUrl = String(req.body?.url || '').trim();
     const deleted = deletePhysicalImageIfUnused(targetUrl);
     res.json({ success: true, file_deleted: deleted });
+  });
+
+  // Unknown API routes always answer with JSON (never the SPA shell)
+  app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'Route not found' });
+  });
+
+  // API error handler: malformed JSON, oversized uploads, etc. must not return HTML/stack traces
+  app.use((err: Error & { status?: number }, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    if (!req.path.startsWith('/api/')) return next(err);
+
+    const status = typeof err.status === 'number' ? err.status : 500;
+    if (status >= 500) console.error('[api]', err);
+    res.status(status).json({
+      error: status === 400 ? 'درخواست نامعتبر است' : status === 413 ? 'حجم فایل بیش از حد مجاز است' : 'خطای سرور',
+    });
   });
 
   // Vite Application Rendering
@@ -696,7 +852,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*all', (req, res) => {
+    app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
